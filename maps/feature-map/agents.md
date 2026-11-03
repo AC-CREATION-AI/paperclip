@@ -235,8 +235,9 @@ retry, and reload; the failure must disappear only after readiness commits.
 Provider output and credentials must not appear in the lifecycle message.
 
 An explicit runner change is a configuration change, with normal revisions and
-session invalidation. Obsolete Claude tuning options (including maxTurnsPerRun) are ignored with a field-specific warning;
-permission, network, filesystem and command incompatibilities still produce an error.
+session invalidation. Obsolete Claude tuning options (Chrome and warm-handle idle timeouts) are ignored with a field-specific warning.
+A nonzero `maxTurnsPerRun` is rejected because Runner does not enforce this limit;
+zero or absent does not claim a turn limit. Permission, network, filesystem and command incompatibilities still produce an error.
 Selecting another runner must not silently discard security settings or change an active run's
 recorded execution. Keep runner choice in Advanced and verify the next eligible
 run separately from historical transcripts.
@@ -247,7 +248,8 @@ pending edits and an environment-variable draft. An unsaved change to a differen
 effective computer must disable the action and explain that the computer change
 must be saved first; restoring the saved target must re-enable it. Reopen the page and compare the
 saved harness, model, account bindings, instructions, and run policy. Check a
-saved `maxTurnsPerRun: 1000`: upgrade must warn and remove it. Test an initially
+saved `maxTurnsPerRun: 1000`: upgrade must fail without saving or dropping the cap.
+Remove the unsupported limit explicitly before retrying. Test an initially
 unqualified Daytona Paperclip Computer: click must probe, record qualification,
 refresh availability, and only then save. A failed probe or changed selection must
 leave the agent on Legacy. Check a rejected permission setting, repair it, and retry. Verify a real task before

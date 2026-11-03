@@ -861,7 +861,7 @@ describe("Claude runner defaults", () => {
     expect(resolveNewAgentRunner({ ...saved, runner: "legacy" })).toEqual({ adapterType: "claude_local", adapterConfig: { model: "custom", dangerouslySkipPermissions: true } });
     expect(() => resolveNewAgentRunner({ ...saved, runner: "legacy", adapterConfig: { ...saved.adapterConfig, acpxPermissionMode: "deny-all" } })).toThrow("cannot honor");
   });
-  it.each(["maxTurnsPerRun", "chrome", "warmHandleIdleMs", "acpWarmHandleIdleMs"])("warns and ignores obsolete Claude %s on conversion and native saves", field => {
+  it.each(["chrome", "warmHandleIdleMs", "acpWarmHandleIdleMs"])("warns and ignores obsolete Claude %s on conversion and native saves", field => {
     for (const adapterType of ["claude_local", "paperclip_runner"]) {
       const onConfigurationWarnings = vi.fn();
       const result = resolveNewAgentRunner({ adapterType, target: mac, runner: "paperclip",
@@ -870,6 +870,18 @@ describe("Claude runner defaults", () => {
       expect(result.adapterConfig).not.toHaveProperty(field);
       expect(onConfigurationWarnings).toHaveBeenCalledWith([expect.objectContaining({ field, code: "runner_option_ignored" })]);
     }
+  });
+  it("rejects a positive Claude turn cap before legacy conversion", () => {
+    const config = { model: "claude-opus-5-5", maxTurnsPerRun: 150 };
+    expect(() => resolveNewAgentRunner({ adapterType: "claude_local", target: mac,
+      runner: "paperclip", adapterConfig: config })).toThrow("maxTurnsPerRun");
+    expect(config.maxTurnsPerRun).toBe(150);
+  });
+  it.each([undefined, 0])("allows Claude conversion without a claimed turn cap (%s)", cap => {
+    const result = resolveNewAgentRunner({ adapterType: "claude_local", target: mac,
+      runner: "paperclip", adapterConfig: { model: "claude-opus-5-5", maxTurnsPerRun: cap } });
+    expect(result.adapterType).toBe("paperclip_runner");
+    expect(result.adapterConfig).not.toHaveProperty("maxTurnsPerRun");
   });
   it.each(["agentCommand", "networkScope"])("rejects unsupported %s without fallback", key => {
     expect(() => resolveNewAgentRunner({ adapterType: "claude_local", target: mac, adapterConfig: { [key]: "configured" } })).toThrow("Legacy runner");

@@ -7,7 +7,6 @@ export interface AgentConfigurationWarning {
 // Only obsolete tuning/features belong here. Permission, filesystem, network,
 // command and credential settings must retain their existing validation.
 const CLAUDE_IGNORED_OPTIONS = {
-  maxTurnsPerRun: "Max turns per run",
   chrome: "Chrome integration",
   warmHandleIdleMs: "Warm handle idle timeout",
   acpWarmHandleIdleMs: "ACP warm handle idle timeout",

@@ -148,8 +148,13 @@ describe("Paperclip Runner native provider configuration", () => {
     expect(resolvePaperclipRunnerNativeProviderInput({ backend: "acpx_runtime", adapterConfig: projected })).toMatchObject({ provider: "acpx", acpxAgent: "claude", claudeEffort: "xhigh", acpxPermissionMode: "deny-all" });
     const changedModel = projectPaperclipRunnerTaskConfig("acpx_runtime", base, { model: "claude-sonnet-5" });
     expect(changedModel).not.toHaveProperty("modelReasoningEffort");
-    expect(resolvePaperclipRunnerNativeProviderInput({ backend: "acpx_runtime", adapterConfig: { ...base, chrome: true, maxTurnsPerRun: 1000 } }))
+    expect(resolvePaperclipRunnerNativeProviderInput({ backend: "acpx_runtime", adapterConfig: { ...base, chrome: true } }))
       .toEqual(resolvePaperclipRunnerNativeProviderInput({ backend: "acpx_runtime", adapterConfig: base }));
+    expect(() => resolvePaperclipRunnerNativeProviderInput({ backend: "acpx_runtime", adapterConfig: { ...base, maxTurnsPerRun: 150 } })).toThrow("maxTurnsPerRun");
+    for (const cap of [undefined, 0]) {
+      expect(resolvePaperclipRunnerNativeProviderInput({ backend: "acpx_runtime", adapterConfig: { ...base, maxTurnsPerRun: cap } }))
+        .toEqual(resolvePaperclipRunnerNativeProviderInput({ backend: "acpx_runtime", adapterConfig: base }));
+    }
     expect(() => resolvePaperclipRunnerNativeProviderInput({ backend: "acpx_runtime", adapterConfig: { ...base, networkScope: "unrestricted" } })).toThrow("Legacy runner");
   });
 

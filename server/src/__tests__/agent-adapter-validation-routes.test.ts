@@ -1352,22 +1352,53 @@ describe("agent routes adapter validation", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
-  it("upgrades a legacy Claude agent with a turn limit, warning instead of rejecting it", async () => {
+  it("rejects a legacy Claude upgrade with an unenforced turn cap before saving", async () => {
     const existing = await mockAgentService.getById();
-    const env = { ANTHROPIC_API_KEY: { type: "plain", value: "synthetic-fixture" } };
     mockAgentService.getById.mockResolvedValue({ ...existing, adapterType: "claude_local",
-      adapterConfig: { model: "claude-opus-5-5", effort: "high", maxTurnsPerRun: 1000,
-        dangerouslySkipPermissions: true, timeoutSec: 0, graceSec: 15, env } });
+      adapterConfig: { model: "claude-opus-5-5", maxTurnsPerRun: 150 } });
+    const app = await createApp();
+    const res = await requestApp(app, baseUrl => request(baseUrl)
+      .patch(`/api/agents/${existing.id}`).send({ runner: "paperclip" }));
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(res.body.details).toMatchObject({ code: "agent_runner_config_incompatible", fields: ["maxTurnsPerRun"] });
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("rejects a native Claude save with an unenforced turn cap before saving", async () => {
+    const existing = await mockAgentService.getById();
+    mockAgentService.getById.mockResolvedValue({ ...existing, adapterType: "paperclip_runner",
+      adapterConfig: { provider: "acpx", acpxAgent: "claude", model: "claude-opus-5-5" } });
+    const app = await createApp();
+    const res = await requestApp(app, baseUrl => request(baseUrl)
+      .patch(`/api/agents/${existing.id}`).send({ adapterConfig: { maxTurnsPerRun: 150 } }));
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(JSON.stringify(res.body)).toContain("maxTurnsPerRun");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 0])("saves native Claude without a claimed turn cap (%s)", async cap => {
+    const existing = await mockAgentService.getById();
+    mockAgentService.getById.mockResolvedValue({ ...existing, adapterType: "paperclip_runner",
+      adapterConfig: { provider: "acpx", acpxAgent: "claude", model: "claude-opus-5-5" } });
+    const app = await createApp();
+    const res = await requestApp(app, baseUrl => request(baseUrl)
+      .patch(`/api/agents/${existing.id}`).send({ adapterConfig: { timeoutSec: 900, ...(cap === undefined ? {} : { maxTurnsPerRun: cap }) } }));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update.mock.calls[0][1].adapterConfig.timeoutSec).toBe(900);
+  });
+
+  it("preserves warnings for obsolete non-safety Claude options on upgrade", async () => {
+    const existing = await mockAgentService.getById();
+    mockAgentService.getById.mockResolvedValue({ ...existing, adapterType: "claude_local",
+      adapterConfig: { model: "claude-opus-5-5", chrome: true, timeoutSec: 900 } });
     const app = await createApp();
     const res = await requestApp(app, baseUrl => request(baseUrl)
       .patch(`/api/agents/${existing.id}`).send({ runner: "paperclip" }));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    const patch = mockAgentService.update.mock.calls[0][1];
-    expect(patch.adapterType).toBe("paperclip_runner");
-    expect(patch.adapterConfig).toMatchObject({ provider: "acpx", acpxAgent: "claude", model: "claude-opus-5-5",
-      modelReasoningEffort: "high", acpxPermissionMode: "approve-all", timeoutSec: 0, graceSec: 15, env });
-    expect(patch.adapterConfig).not.toHaveProperty("maxTurnsPerRun");
-    expect(res.body.configurationWarnings).toEqual([expect.objectContaining({ field: "maxTurnsPerRun", code: "runner_option_ignored" })]);
+    expect(mockAgentService.update.mock.calls[0][1].adapterConfig).toMatchObject({ timeoutSec: 900 });
+    expect(res.body.configurationWarnings).toEqual([expect.objectContaining({ field: "chrome", code: "runner_option_ignored" })]);
   });
 
   it("normalizes legacy skills and permissions when switching to paperclip_runner", async () => {
