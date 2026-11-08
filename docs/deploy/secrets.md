@@ -519,3 +519,50 @@ Agent environment variables use secret references:
 ```
 
 The server resolves and decrypts these at runtime, injecting the real value into the agent process environment.
+
+## Run Log Redaction And Access
+
+Run logs carry tool output verbatim, so they are the most likely place for a
+secret value to surface after resolution. Two server-side controls apply to
+`GET /api/heartbeat-runs/:id/log`:
+
+- **Redaction at read time.** Before a log chunk is served, the server masks
+  the registered disclosure values of the run, the current values of every
+  secret bound to the run's agent (env injection, agent access, run secret
+  manifest), fragments of those values (truncated debug dumps), any value
+  matched by a stored secret-version sha256 fingerprint, and the secret
+  family patterns (provider-prefixed tokens such as `sk-`, `ghp_`,
+  `github_pat_`, `pcp_`, PEM `BEGIN ... PRIVATE KEY` blocks, `user:pass@`
+  credential URLs, `Bearer`/`Basic`/`Token` credentials, and JWTs). Masking
+  is by value shape, not by header or variable name.
+- **Access control.** The log route answers only to the run's own agent
+  identity and to board principals (operators, instance admins). Any other
+  agent of the company receives `403`. A run the caller cannot see at all
+  keeps answering `404`.
+
+### Never Display Secret Values
+
+Never print, paste, or log the `value` field of a secret. When a workflow
+needs to prove which secret was involved, output only its length or its
+`sha256` truncated to 12 characters. Command wrappers follow the same rule:
+a `curl .../value` call must never end up in a stdout. The server-side
+redaction above is a backstop, not a license to display values.
+
+### Shared Runner User (No Per-Agent Filesystem Isolation)
+
+On the current deployments every agent runs under the same OS user (uid 999,
+`pcagent`) with a shared home directory. Consequences:
+
+- file permissions do **not** isolate agents from each other: a `0600` (or
+  `000`) file written by one agent can be re-read by any other agent running
+  under the same uid;
+- `chattr` is unavailable in the containers, so no immutable flag can be
+  raised against a peer of the same uid.
+
+Rule: **do not write secrets or secret archives to the shared home directory
+or `/tmp`** while the uid is shared. Keep secret material in the company
+secret store, and treat any plaintext landing on the runner filesystem as
+already disclosed. If per-agent isolation is ever introduced (uid per agent
+or container per run), verify with two distinct identities that a `0600` file
+written by one agent is no longer readable by another.
+
