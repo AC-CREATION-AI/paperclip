@@ -17,7 +17,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./test-embedded-postgres.js";
 
-const MIGRATION_FILE = "0449_builtin_bundle_routine_responsible_user.sql";
+const MIGRATION_FILE = "0450_builtin_bundle_routine_responsible_user.sql";
 const MARKER = "built-in-bundles";
 
 const cleanups: Array<() => Promise<void>> = [];
