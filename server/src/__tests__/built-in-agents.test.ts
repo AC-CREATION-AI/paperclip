@@ -1024,6 +1024,40 @@ describeEmbeddedPostgres("built-in agents", () => {
     await expectNoMarkedRevisions(routine!.id, "enabling-user");
   });
 
+  it("disables a legacy built-in-bundles routine schedule even when no user can own it", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Ownerless",
+      issuePrefix: issuePrefix(companyId),
+      requireBoardApprovalForNewAgents: false,
+    });
+    const builtIns = builtInAgentService(db);
+    await builtIns.ensure(companyId, "reflection-coach", {}, { createdByUserId: "enabling-user" });
+    await builtIns.enableRoutineSchedule(companyId, "reflection-coach", "recent-agent-reflection", {
+      userId: "enabling-user",
+    });
+    const installed = await poisonBundleRoutine(companyId);
+
+    // Stopping a routine must not depend on finding it an owner: an agent
+    // pausing it in a company without a default responsible user or an active
+    // owner succeeds, and the marker stays for the next run or enable to repair.
+    const disabled = await builtIns.disableRoutineSchedule(companyId, "reflection-coach", "recent-agent-reflection", {
+      agentId: null,
+    });
+    expect(disabled.resources.find((resource) => resource.resourceKind === "routine")).toMatchObject({
+      scheduleEnabled: false,
+    });
+    const [paused] = await db.select().from(routines).where(eq(routines.id, installed.id));
+    expect(paused!.status).toBe("paused");
+    expect(paused!.responsibleUserId).toBe("built-in-bundles");
+
+    // Enabling it again hands it to the scheduler, so an owner is still required.
+    await expect(
+      builtIns.enableRoutineSchedule(companyId, "reflection-coach", "recent-agent-reflection", { agentId: null }),
+    ).rejects.toMatchObject({ status: 422 });
+  });
+
   it("recreates missing managed resource bindings idempotently during concurrent reconcile", async () => {
     const companyId = await seedCompany({ requireApproval: false });
     await createAgentLifecycle(db).requestHire(companyId, {

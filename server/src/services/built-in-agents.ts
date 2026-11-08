@@ -1468,7 +1468,15 @@ export function builtInAgentService(db: Db) {
 
   // Single choke point for bundle-routine mutations (run, schedule), so a
   // routine left behind by an older release is repaired before it is used.
-  async function requireBundleRoutine(companyId: string, key: string, routineKey: string, actorUserId?: string | null) {
+  // Only a mutation that starts runs needs that repair to succeed; stopping a
+  // routine repairs it when an owner is known and otherwise leaves it as is.
+  async function requireBundleRoutine(
+    companyId: string,
+    key: string,
+    routineKey: string,
+    actorUserId?: string | null,
+    options: { requireResponsibleUser?: boolean } = {},
+  ) {
     const definition = requireBuiltInAgentDefinition(key);
     if (!definition.bundle || definition.bundle.routine.routineKey !== routineKey) {
       throw notFound("Built-in routine not found");
@@ -1478,8 +1486,11 @@ export function builtInAgentService(db: Db) {
     if (!agent) throw notFound("Built-in agent is not provisioned");
     const current = await getRoutineByBinding(companyId, definition);
     if (!current.routine) throw notFound("Built-in routine not found");
+    const requireResponsibleUser = options.requireResponsibleUser ?? true;
     const candidateUserId = hasLegacyBundleResponsibleUser(current.routine)
-      ? await requireBundleRoutineResponsibleUserId(db, companyId, actorUserId)
+      ? requireResponsibleUser
+        ? await requireBundleRoutineResponsibleUserId(db, companyId, actorUserId)
+        : await resolveBundleRoutineResponsibleUserId(db, companyId, actorUserId)
       : null;
     await repairLegacyBundleRoutineResponsibleUser(db, current.routine, candidateUserId);
     const schedule = current.triggers.find((trigger) => trigger.kind === "schedule") ?? null;
@@ -2189,7 +2200,13 @@ export function builtInAgentService(db: Db) {
     enabled: boolean,
     actor: { agentId?: string | null; userId?: string | null; runId?: string | null } = {},
   ) {
-    const { definition, agent, routine, schedule } = await requireBundleRoutine(companyId, key, routineKey, actor.userId ?? null);
+    const { definition, agent, routine, schedule } = await requireBundleRoutine(
+      companyId,
+      key,
+      routineKey,
+      actor.userId ?? null,
+      { requireResponsibleUser: enabled },
+    );
     if (!schedule) throw notFound("Built-in routine schedule not found");
     if (enabled) {
       await ensureBuiltInAgentAssignable(agent);
