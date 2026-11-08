@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companySecrets, companySecretVersions, heartbeatRuns } from "@paperclipai/db";
 import { REDACTED_EVENT_VALUE, redactSecretFamilyPatterns } from "../redaction.js";
@@ -71,90 +71,236 @@ function mapRedactableStrings<T>(input: T, fn: (text: string) => string): T {
   ) as T;
 }
 
-// Candidate spans for fingerprint and partial-value matching: bare
-// value-shaped tokens and the contents of quoted strings, which carry values
-// with spaces.
-const FINGERPRINT_CANDIDATE_RE = /"((?:[^"\\\n]|\\.)*)"|'([^'\n]{4,})'|[A-Za-z0-9+/=_~.\-]{6,}/g;
+// Candidate spans worth hashing for fingerprint matching. Label splits and
+// span length are bounded so a minified JSON blob (one token, thousands of
+// `:`) stays linear; quoted values inside it are still candidates.
+const FINGERPRINT_CANDIDATE_MIN_LENGTH = 6;
+const FINGERPRINT_CANDIDATE_MAX_LENGTH = 4096;
+const FINGERPRINT_CANDIDATE_MAX_LABELS = 2;
+const CANDIDATE_TOKEN_RE = /\S{6,}/g;
+const CANDIDATE_QUOTED_RE = /"([^"\n]{6,})"|'([^'\n]{6,})'/g;
+const CANDIDATE_LEADING_WRAP_RE = /^[("'`[{<]+/;
+const CANDIDATE_TRAILING_WRAP_RE = /[)"'`\]}>,;:.]+$/;
 
 // Shortest fragment of a known secret value worth masking on its own. Below
 // this, fragments collide with ordinary log text too often to mask safely;
 // whole values are still masked by the known-value pass.
 const PARTIAL_SECRET_MIN_LENGTH = 24;
 
+type Span = { start: number; end: number };
+
 function fingerprint(value: string) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function candidateSpans(text: string): Array<{ start: number; end: number; value: string }> {
-  const spans: Array<{ start: number; end: number; value: string }> = [];
-  FINGERPRINT_CANDIDATE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = FINGERPRINT_CANDIDATE_RE.exec(text)) !== null) {
-    const quoted = match[1] ?? match[2];
-    const candidate = quoted ?? match[0];
-    const base = match.index + (quoted !== undefined ? 1 : 0);
-    const trimmed = candidate.trim();
-    for (const variant of trimmed === candidate ? [candidate] : [candidate, trimmed]) {
-      if (variant.length === 0) continue;
-      const offset = base + candidate.indexOf(variant);
-      spans.push({ start: offset, end: offset + variant.length, value: variant });
-      break;
+/**
+ * Candidate spans for fingerprint matching: every whitespace-delimited run,
+ * its value part after each `KEY=` / `header:` label, the same without
+ * wrapping quotes or trailing punctuation, and the contents of quoted strings,
+ * which carry values with spaces.
+ */
+function candidateSpans(text: string): Array<Span & { value: string }> {
+  const spans: Array<Span & { value: string }> = [];
+  const push = (start: number, value: string) => {
+    if (value.length >= FINGERPRINT_CANDIDATE_MIN_LENGTH && value.length <= FINGERPRINT_CANDIDATE_MAX_LENGTH) {
+      spans.push({ start, end: start + value.length, value });
     }
+  };
+  for (const match of text.matchAll(CANDIDATE_TOKEN_RE)) {
+    const token = match[0];
+    const starts = [0];
+    for (let index = 0; index < token.length && starts.length <= FINGERPRINT_CANDIDATE_MAX_LABELS; index += 1) {
+      if (token[index] === "=" || token[index] === ":") starts.push(index + 1);
+    }
+    for (const offset of starts) {
+      const part = token.slice(offset);
+      const leading = CANDIDATE_LEADING_WRAP_RE.exec(part)?.[0].length ?? 0;
+      const unwrapped = part.slice(leading).replace(CANDIDATE_TRAILING_WRAP_RE, "");
+      push(match.index + offset, part);
+      if (unwrapped !== part) push(match.index + offset + leading, unwrapped);
+    }
+  }
+  for (const match of text.matchAll(CANDIDATE_QUOTED_RE)) {
+    push(match.index + 1, match[1] ?? match[2]!);
   }
   return spans;
 }
 
-function maskSpans(text: string, spans: Array<{ start: number; end: number }>): string {
+/** Mask spans, merging overlaps so a nested candidate never splits a mask. */
+function maskSpans(text: string, spans: Span[]): string {
   if (spans.length === 0) return text;
-  const ordered = [...spans].sort((left, right) => right.start - left.start);
-  let out = text;
+  const ordered = [...spans].sort((left, right) => left.start - right.start || right.end - left.end);
+  let out = "";
+  let cursor = 0;
   for (const span of ordered) {
-    out = `${out.slice(0, span.start)}${REDACTED_EVENT_VALUE}${out.slice(span.end)}`;
+    if (span.end <= cursor) continue;
+    out += `${text.slice(cursor, Math.max(cursor, span.start))}${REDACTED_EVENT_VALUE}`;
+    cursor = span.end;
   }
-  return out;
+  return out + text.slice(cursor);
 }
 
 /**
  * Mask candidate spans whose sha256 matches a stored secret-version
  * fingerprint (ACC-3241). The comparison is done by hash only: no secret
  * value is resolved, displayed, or logged, and a candidate that does not
- * match is left byte-identical. Only whole candidate spans match - truncated
- * material is covered by the partial-value pass and the family patterns.
+ * match is left byte-identical. Only whole values match - truncated material
+ * is covered by the partial-value pass and the family patterns.
  */
-export function redactSecretFingerprintMatches<T>(input: T, fingerprints: ReadonlySet<string>): T {
-  if (fingerprints.size === 0) return input;
-  return mapRedactableStrings(input, (text) => {
-    if (text.length === 0) return text;
-    const spans = candidateSpans(text)
-      .filter((span) => fingerprints.has(fingerprint(span.value)))
-      .map(({ start, end }) => ({ start, end }));
-    return maskSpans(text, spans);
+function redactFingerprintMatchesInText(text: string, fingerprints: ReadonlySet<string>): string {
+  if (fingerprints.size === 0 || text.length === 0) return text;
+  const hashed = new Map<string, boolean>();
+  const spans = candidateSpans(text).filter((span) => {
+    let matched = hashed.get(span.value);
+    if (matched === undefined) {
+      matched = fingerprints.has(fingerprint(span.value));
+      hashed.set(span.value, matched);
+    }
+    return matched;
   });
+  return maskSpans(text, spans);
+}
+
+type PartialSecretIndex = { values: string[]; windows: Set<string> };
+
+function partialSecretIndex(values: readonly string[]): PartialSecretIndex {
+  const normalized = [...new Set(values.map((value) => value.replace(/\s+/g, "")))]
+    .filter((value) => value.length >= PARTIAL_SECRET_MIN_LENGTH);
+  const windows = new Set<string>();
+  for (const value of normalized) {
+    for (let index = 0; index + PARTIAL_SECRET_MIN_LENGTH <= value.length; index += 1) {
+      windows.add(value.slice(index, index + PARTIAL_SECRET_MIN_LENGTH));
+    }
+  }
+  return { values: normalized, windows };
 }
 
 /**
  * Mask fragments of known secret values (ACC-3241 C7): debug dumps and
  * truncated reads leak a prefix of a key without ever carrying the whole
- * value, which the known-value pass cannot catch. Comparison is done on
- * whitespace-normalized copies so line-wrapped key material still matches;
- * the masked span stays the original one.
+ * value, wherever it sits (`API_TOKEN=<prefix>`, `<prefix>...`, mid-line).
+ * Text and values are compared whitespace-free so line-wrapped key material
+ * still matches; each run of at least PARTIAL_SECRET_MIN_LENGTH characters
+ * shared with a known value is masked on its original span.
  */
-export function redactPartialSecretMatches<T>(input: T, values: readonly string[]): T {
-  const normalized = values
-    .map((value) => value.replace(/\s+/g, ""))
-    .filter((value) => value.length >= PARTIAL_SECRET_MIN_LENGTH);
-  if (normalized.length === 0) return input;
-  return mapRedactableStrings(input, (text) => {
-    if (text.length === 0) return text;
-    const spans = candidateSpans(text)
-      .filter((span) => {
-        if (span.value.length < PARTIAL_SECRET_MIN_LENGTH) return false;
-        const stripped = span.value.replace(/\s+/g, "");
-        return normalized.some((value) => value.includes(stripped));
-      })
-      .map(({ start, end }) => ({ start, end }));
-    return maskSpans(text, spans);
+function redactPartialMatchesInText(text: string, index: PartialSecretIndex): string {
+  if (index.windows.size === 0 || text.length < PARTIAL_SECRET_MIN_LENGTH) return text;
+  const positions: number[] = [];
+  const kept: string[] = [];
+  for (let position = 0; position < text.length; position += 1) {
+    if (/\s/.test(text[position]!)) continue;
+    positions.push(position);
+    kept.push(text[position]!);
+  }
+  const stripped = kept.join("");
+  const spans: Span[] = [];
+  let cursor = 0;
+  while (cursor + PARTIAL_SECRET_MIN_LENGTH <= stripped.length) {
+    const seed = stripped.slice(cursor, cursor + PARTIAL_SECRET_MIN_LENGTH);
+    if (!index.windows.has(seed)) {
+      cursor += 1;
+      continue;
+    }
+    let length = PARTIAL_SECRET_MIN_LENGTH;
+    for (const value of index.values) {
+      for (let from = value.indexOf(seed); from !== -1; from = value.indexOf(seed, from + 1)) {
+        let matched = PARTIAL_SECRET_MIN_LENGTH;
+        while (cursor + matched < stripped.length && from + matched < value.length
+          && stripped[cursor + matched] === value[from + matched]) matched += 1;
+        length = Math.max(length, matched);
+      }
+    }
+    spans.push({ start: positions[cursor]!, end: positions[cursor + length - 1]! + 1 });
+    cursor += length;
+  }
+  return maskSpans(text, spans);
+}
+
+/**
+ * Decode a JSON string body, redact the decoded text and re-encode it. A body
+ * the redaction leaves unchanged keeps its original bytes. A body cut by the
+ * page window may end inside an escape sequence; that tail is kept raw.
+ */
+function redactJsonStringBody(body: string, redact: (text: string) => string): string {
+  for (let cut = body.length; cut >= Math.max(0, body.length - 6); cut -= 1) {
+    let decoded: string;
+    try {
+      decoded = JSON.parse(`"${body.slice(0, cut)}"`) as string;
+    } catch {
+      continue;
+    }
+    const redacted = redact(decoded);
+    return redacted === decoded ? body : `${JSON.stringify(redacted).slice(1, -1)}${body.slice(cut)}`;
+  }
+  return redact(body);
+}
+
+/** Redact every string literal of a (possibly cut) JSON record line. */
+function redactJsonRecordLine(line: string, startsInString: boolean, redact: (text: string) => string): string {
+  let out = "";
+  let cursor = 0;
+  let inString = startsInString;
+  while (cursor < line.length) {
+    if (!inString) {
+      const quote = line.indexOf("\"", cursor);
+      if (quote === -1) return out + line.slice(cursor);
+      out += line.slice(cursor, quote + 1);
+      cursor = quote + 1;
+      inString = true;
+      continue;
+    }
+    let end = cursor;
+    while (end < line.length && line[end] !== "\"") end += line[end] === "\\" ? 2 : 1;
+    end = Math.min(end, line.length);
+    out += redactJsonStringBody(line.slice(cursor, end), redact);
+    if (end < line.length) out += "\"";
+    cursor = end + 1;
+    inString = false;
+  }
+  return out;
+}
+
+/** A page that starts mid-record begins inside a string literal: `…text","seq":3}`. */
+function startsInsideJsonString(line: string) {
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] === "\\") {
+      index += 1;
+    } else if (line[index] === "\"") {
+      return /^(?:,"|:|\})/.test(line.slice(index + 1));
+    }
+  }
+  return false;
+}
+
+/**
+ * Apply `redact` to the text a served run log actually carries (ACC-3241).
+ * The log store writes NDJSON records (run-log-store.ts) whose tool output is
+ * JSON-escaped inside string fields, so redaction runs on each decoded string
+ * literal and the record is re-encoded, staying valid JSON. Records cut by the
+ * page window (`offset` / `limitBytes`) are handled the same way. Consecutive
+ * lines that are not records are redacted together as plain text, so
+ * multi-line material (PEM blocks) still matches.
+ */
+export function redactRunLogContent(content: string, redact: (text: string) => string): string {
+  const lines = content.split("\n");
+  const out: string[] = [];
+  let plain: string[] = [];
+  const flushPlain = () => {
+    if (plain.length > 0) out.push(redact(plain.join("\n")));
+    plain = [];
+  };
+  lines.forEach((line, index) => {
+    if (line.startsWith("{\"")) {
+      flushPlain();
+      out.push(redactJsonRecordLine(line, false, redact));
+    } else if (index === 0 && startsInsideJsonString(line)) {
+      out.push(redactJsonRecordLine(line, true, redact));
+    } else {
+      plain.push(line);
+    }
   });
+  flushPlain();
+  return out.join("\n");
 }
 
 export function createRunSecretRedactionRegistry(db: Db) {
@@ -192,20 +338,17 @@ export function createRunSecretRedactionRegistry(db: Db) {
     return valuesForRuns(rows);
   }
 
-  async function activeCompanySecretFingerprints(companyId: string): Promise<Set<string>> {
+  // Every stored version of every company secret: a rotated, revoked or
+  // deleted value printed before the change is still a leak. Only digests are
+  // read, so widening the set discloses nothing.
+  async function companySecretFingerprints(companyId: string): Promise<Set<string>> {
     const rows = await db.select({
       fingerprintSha256: companySecretVersions.fingerprintSha256,
       valueSha256: companySecretVersions.valueSha256,
     })
       .from(companySecretVersions)
       .innerJoin(companySecrets, eq(companySecretVersions.secretId, companySecrets.id))
-      .where(and(
-        eq(companySecrets.companyId, companyId),
-        eq(companySecrets.scope, "company"),
-        eq(companySecrets.status, "active"),
-        eq(companySecretVersions.status, "current"),
-        isNull(companySecretVersions.revokedAt),
-      ));
+      .where(eq(companySecrets.companyId, companyId));
     const fingerprints = new Set<string>();
     for (const row of rows) {
       if (row.fingerprintSha256) fingerprints.add(row.fingerprintSha256);
@@ -275,10 +418,11 @@ export function createRunSecretRedactionRegistry(db: Db) {
     /**
      * Run-log redaction (ACC-3241): masks registered values, the current
      * values of the secrets bound to the run's agent (env injection and agent
-     * access), fragments of those known values, every active company secret
-     * value matched by fingerprint, and the secret family patterns. Resolved
-     * values are request-scoped and never displayed; the fingerprint pass
-     * compares sha256 digests only.
+     * access), fragments of those known values, every stored company secret
+     * version matched by fingerprint, and the secret family patterns. The
+     * passes run on the decoded text of each NDJSON record, not on its
+     * JSON-escaped form. Resolved values are request-scoped and never
+     * displayed; the fingerprint pass compares sha256 digests only.
      */
     redactRunLog: async <T>(
       companyId: string,
@@ -291,14 +435,16 @@ export function createRunSecretRedactionRegistry(db: Db) {
           agentId: run.agentId ?? null,
           runId: run.id,
         }),
-        activeCompanySecretFingerprints(companyId),
+        companySecretFingerprints(companyId),
       ]);
       const values = [...new Set([...disclosure.values, ...boundValues])]
         .sort((left, right) => right.length - left.length);
-      const knownMasked = redactRegisteredSecretValues(value, values);
-      const partialMasked = redactPartialSecretMatches(knownMasked, values);
-      const fingerprintMasked = redactSecretFingerprintMatches(partialMasked, fingerprints);
-      return mapRedactableStrings(fingerprintMasked, redactSecretFamilyPatterns);
+      const partialIndex = partialSecretIndex(values);
+      const redact = (text: string) => redactSecretFamilyPatterns(redactFingerprintMatchesInText(
+        redactPartialMatchesInText(redactText(text, values), partialIndex),
+        fingerprints,
+      ));
+      return mapRedactableStrings(value, (text) => redactRunLogContent(text, redact));
     },
     redactForIssue: async <T>(companyId: string, issueId: string, value: T): Promise<T> =>
       redactRegisteredSecretValues(value, await valuesForIssue(companyId, issueId)),

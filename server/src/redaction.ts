@@ -397,15 +397,6 @@ const SECRET_TEXT_HINTS = [
   "ghu_",
   "ghs_",
   "ghr_",
-  "github_pat_",
-  "glpat-",
-  "xox",
-  "akia",
-  "aiza",
-  "pcp_",
-  "eyj",
-  "-----begin",
-  "://",
 ] as const;
 export const REDACTED_EVENT_VALUE = "***REDACTED***";
 
@@ -1025,7 +1016,9 @@ export function redactAgentAdapterConfig(
  * ones), provider-prefixed keys, credential URLs, authorization headers and
  * JWTs. Masking is by value shape, never by header or variable name (C7): the
  * same token is masked under `X-Paperclip-Api-Key`, `X-Board-Key` or any other
- * label.
+ * label. They apply to run logs only (`redactRunLogText`), not to agent prose:
+ * an authorization scheme is masked only when followed by a credential-shaped
+ * value (a digit or base64 symbol), so "Token authentication-required" stays.
  */
 const PEM_PRIVATE_KEY_BLOCK_RE =
   /-----BEGIN ([A-Z0-9 ]*?)PRIVATE KEY-----(?:(?:\r?\n(?:[A-Za-z0-9+/=]{6,}|\*\*\*REDACTED\*\*\*))(?=\r?\n|$))*(?:\r?\n-----END \1PRIVATE KEY-----)?/g;
@@ -1033,7 +1026,7 @@ const SECRET_FAMILY_TOKEN_RE =
   /(?<![A-Za-z0-9_-])(?:sk-(?:ant-|or-v1-|proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|pcp_[A-Za-z0-9_.=-]{12,})/g;
 const JWT_TOKEN_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
 const CREDENTIAL_URL_RE = /\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s:/@'"`]*):([^\s@/'"`]+)@/g;
-const FAMILY_AUTHORIZATION_RE = /\b(Bearer|Basic|Token)(\s+)([A-Za-z0-9._~+/=-]{12,})/g;
+const FAMILY_AUTHORIZATION_RE = /\b(Bearer|Basic|Token)(\s+)(?=[A-Za-z._~-]*[0-9+/=])([A-Za-z0-9._~+/=-]{16,})/g;
 
 export function redactSecretFamilyPatterns(input: string): string {
   return input
@@ -1051,7 +1044,7 @@ export function redactSecretFamilyPatterns(input: string): string {
 
 export function redactSensitiveText(input: string): string {
   if (!maybeContainsSecretText(input)) return input;
-  return redactSecretFamilyPatterns(redactCommandText(
+  return redactCommandText(
     redactStandaloneBearerCredentials(redactAuthorizationCredentials(input))
       .replace(JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
       .replace(
@@ -1059,5 +1052,10 @@ export function redactSensitiveText(input: string): string {
         `$1${REDACTED_EVENT_VALUE}$2`,
       ),
     REDACTED_EVENT_VALUE,
-  ));
+  );
+}
+
+/** Run-log text redaction: the generic sensitive-text pass plus the secret family patterns. */
+export function redactRunLogText(input: string): string {
+  return redactSecretFamilyPatterns(redactSensitiveText(input));
 }

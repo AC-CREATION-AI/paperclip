@@ -526,15 +526,22 @@ Run logs carry tool output verbatim, so they are the most likely place for a
 secret value to surface after resolution. Two server-side controls apply to
 `GET /api/heartbeat-runs/:id/log`:
 
-- **Redaction at read time.** Before a log chunk is served, the server masks
-  the registered disclosure values of the run, the current values of every
-  secret bound to the run's agent (env injection, agent access, run secret
-  manifest), fragments of those values (truncated debug dumps), any value
-  matched by a stored secret-version sha256 fingerprint, and the secret
-  family patterns (provider-prefixed tokens such as `sk-`, `ghp_`,
-  `github_pat_`, `pcp_`, PEM `BEGIN ... PRIVATE KEY` blocks, `user:pass@`
-  credential URLs, `Bearer`/`Basic`/`Token` credentials, and JWTs). Masking
-  is by value shape, not by header or variable name.
+- **Redaction at read time.** Before a log page is served, the server masks
+  the registered disclosure values of the run, the values of every secret
+  version bound to the run's agent (env injection, agent access, run secret
+  manifest), fragments of at least 24 characters of those values (truncated
+  debug dumps, `KEY=<prefix>`), any value matched by the sha256 fingerprint
+  of a stored version of a company secret (rotated and revoked versions
+  included), and the secret family patterns (provider-prefixed tokens such as
+  `sk-`, `ghp_`, `github_pat_`, `pcp_`, PEM `BEGIN ... PRIVATE KEY` blocks,
+  `user:pass@` credential URLs, credential-shaped `Bearer`/`Basic`/`Token`
+  values, and JWTs). Masking is by value shape, not by header or variable
+  name. The log is NDJSON: redaction runs on the decoded text of each
+  record's string fields, records cut by the page window included, and the
+  served records stay valid JSON.
+- **Redaction at write time.** Chunks are stored after the generic
+  sensitive-text pass and the same family patterns. Family patterns apply to
+  run logs only; agent comments and other prose keep the generic pass.
 - **Access control.** The log route answers only to the run's own agent
   identity and to board principals (operators, instance admins). Any other
   agent of the company receives `403`. A run the caller cannot see at all

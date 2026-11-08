@@ -1929,12 +1929,19 @@ export function secretService(db: Db | DbTransaction) {
         inArray(companySecrets.id, [...new Set(bindings.map((binding) => binding.secretId))]),
       ));
 
-    const values: string[] = [];
-    for (const secret of secrets) {
-      const binding = bindings.find((entry) => entry.secretId === secret.id);
-      if (!binding) continue;
+    // A secret bound several times on different versions masks each version.
+    const secretsById = new Map(secrets.map((secret) => [secret.id, secret]));
+    const targets = new Map<string, { secret: (typeof secrets)[number]; version: number }>();
+    for (const binding of bindings) {
+      const secret = secretsById.get(binding.secretId);
+      if (!secret) continue;
       const version = binding.versionSelector === "latest" ? secret.latestVersion : Number(binding.versionSelector);
       if (!Number.isInteger(version) || version < 1) continue;
+      targets.set(`${secret.id}:${version}`, { secret, version });
+    }
+
+    const values: string[] = [];
+    for (const { secret, version } of targets.values()) {
       try {
         const versionRow = await getSecretVersion(secret.id, version);
         if (!versionRow || versionRow.status === "disabled" || versionRow.status === "destroyed" || versionRow.revokedAt) continue;
