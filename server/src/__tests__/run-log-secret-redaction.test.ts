@@ -358,3 +358,50 @@ describe("run log secret redaction on ACP run logs (ACC-3241, output escaped twi
     for (const event of events) expect(compactRunLogChunk(event)).toBe(event);
   });
 });
+
+// A hub MCP tool reached through `run_tool`: the ACP event text wraps the
+// gateway envelope, whose `text` holds the tool output, often pretty-printed
+// JSON. That output sits four levels of escaping below the served record.
+function acpxRunToolResult(output: string) {
+  return acpxToolCall(`tool call (completed): ${JSON.stringify({
+    content: [{ type: "text", text: output }],
+    structuredContent: null,
+    isError: false,
+    transport: "mcp_http",
+    spawnedLocalProcess: false,
+  })}`);
+}
+
+describe("run log secret redaction on hub MCP tool output (ACC-3241, run_tool envelope)", () => {
+  const prettyItem = (pem: string) => JSON.stringify({ name: "deploy key", sshKey: { privateKey: pem } }, null, 2);
+  // A short last base64 line stays under the fragment pass threshold on its own.
+  const body = [...PEM_BODY, "ZmFrZWtleXRhaWw="];
+  const pem = `-----BEGIN OPENSSH PRIVATE KEY-----\n${body.join("\n")}\n-----END OPENSSH PRIVATE KEY-----\n`;
+
+  it("collapses an unknown PEM in pretty-printed JSON of an already stored log", async () => {
+    const { registry, run } = fixture({});
+    const out = await registry.redactRunLog("company-1", run, { content: ndjson(acpxRunToolResult(prettyItem(pem))) });
+    for (const line of body) expect(out.content).not.toContain(line);
+    expect(JSON.parse(chunks(out.content)[0]!)).toMatchObject({ type: "acpx.tool_call", toolCallId: "call-1" });
+  });
+
+  it("masks every line of a bound PEM in the same output", async () => {
+    resolveBoundValues.mockResolvedValueOnce([pem]);
+    const { registry, run } = fixture({});
+    const out = await registry.redactRunLog("company-1", run, { content: ndjson(acpxRunToolResult(prettyItem(pem))) });
+    for (const line of body) expect(out.content).not.toContain(line);
+  });
+
+  it("masks the same output at write time", () => {
+    const stored = compactRunLogChunk(acpxRunToolResult(prettyItem(pem)));
+    for (const line of body) expect(stored).not.toContain(line);
+  });
+
+  it("leaves an ordinary run_tool result byte-identical, on read and on write", async () => {
+    const event = acpxRunToolResult(JSON.stringify([{ name: "paperclip", note: "line\nbreak \"q\"" }], null, 2));
+    const { registry, run } = fixture({});
+    const content = ndjson(event);
+    expect((await registry.redactRunLog("company-1", run, { content })).content).toBe(content);
+    expect(compactRunLogChunk(event)).toBe(event);
+  });
+});

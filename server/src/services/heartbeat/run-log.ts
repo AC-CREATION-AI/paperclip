@@ -113,7 +113,7 @@ export function compactRunLogChunk(
   const normalized = redactRunLogContent(
     redactRunLogText(redactInlineBase64ImageData(chunk)),
     redactRunLogText,
-    { pageStart: false },
+    { chunk: true },
   );
   if (normalized.length <= maxChars) return normalized;
 

@@ -1119,10 +1119,12 @@ function startsInsideJsonString(line: string) {
   return false;
 }
 
-// Levels of JSON nesting walked below a log record: the stored chunk, the ACP
-// event it carries (`acpx.tool_call` and its `text`), then JSON printed by the
-// tool itself. Deeper material only gets the plain-text passes.
-const MAX_NESTED_RUN_LOG_DEPTH = 3;
+// Levels of JSON nesting walked inside a stored chunk: the ACP event it
+// carries (`acpx.tool_call` and its `text`), the MCP gateway envelope of a
+// `run_tool` result, then JSON printed by the tool itself. A served log page
+// adds one level for the record that wraps each chunk. Deeper material only
+// gets the plain-text passes.
+const MAX_NESTED_CHUNK_DEPTH = 3;
 const ESCAPED_JSON_STRING_LITERAL_RE = /"((?:[^"\\\n]|\\.)*)"/g;
 
 /** Redact the decoded text of JSON string literals that carry escapes (pretty-printed JSON, quoted dumps). */
@@ -1174,12 +1176,15 @@ function redactRunLogContentAt(
  * valid JSON. Records cut by the page window (`offset` / `limitBytes`) are
  * handled the same way. Consecutive lines that are not records are redacted
  * together as plain text, so multi-line material (PEM blocks) still matches.
- * Content the redaction leaves unchanged keeps its original bytes.
+ * Content the redaction leaves unchanged keeps its original bytes. `content`
+ * is a served log page by default; `chunk` marks a single chunk before it is
+ * stored, one level shallower.
  */
 export function redactRunLogContent(
   content: string,
   redact: (text: string) => string,
-  options: { pageStart?: boolean } = {},
+  options: { pageStart?: boolean; chunk?: boolean } = {},
 ): string {
-  return redactRunLogContentAt(content, redact, MAX_NESTED_RUN_LOG_DEPTH, options.pageStart ?? true);
+  const depth = options.chunk ? MAX_NESTED_CHUNK_DEPTH : MAX_NESTED_CHUNK_DEPTH + 1;
+  return redactRunLogContentAt(content, redact, depth, options.pageStart ?? !options.chunk);
 }
