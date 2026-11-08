@@ -1031,6 +1031,9 @@ const FAMILY_AUTHORIZATION_RE = /\b(Bearer|Basic|Token)(\s+)(?=[A-Za-z._~-]*[0-9
 export function redactSecretFamilyPatterns(input: string): string {
   return input
     .replace(PEM_PRIVATE_KEY_BLOCK_RE, (match, kind: string) => {
+      // A lone header carries no key material; rewriting it would insert a
+      // raw newline into JSON-escaped text.
+      if (match === `-----BEGIN ${kind}PRIVATE KEY-----`) return match;
       const footer = match.includes("-----END ")
         ? `\n-----END ${kind}PRIVATE KEY-----`
         : "";
@@ -1058,4 +1061,125 @@ export function redactSensitiveText(input: string): string {
 /** Run-log text redaction: the generic sensitive-text pass plus the secret family patterns. */
 export function redactRunLogText(input: string): string {
   return redactSecretFamilyPatterns(redactSensitiveText(input));
+}
+
+/**
+ * Decode a JSON string body, redact the decoded text and re-encode it. A body
+ * the redaction leaves unchanged keeps its original bytes. A body cut by the
+ * page window may end inside an escape sequence; that tail is kept raw.
+ */
+function redactJsonStringBody(body: string, redact: (text: string) => string): string {
+  for (let cut = body.length; cut >= Math.max(0, body.length - 6); cut -= 1) {
+    let decoded: string;
+    try {
+      decoded = JSON.parse(`"${body.slice(0, cut)}"`) as string;
+    } catch {
+      continue;
+    }
+    const redacted = redact(decoded);
+    return redacted === decoded ? body : `${JSON.stringify(redacted).slice(1, -1)}${body.slice(cut)}`;
+  }
+  return redact(body);
+}
+
+/** Redact every string literal of a (possibly cut) JSON record line. */
+function redactJsonRecordLine(line: string, startsInString: boolean, redact: (text: string) => string): string {
+  let out = "";
+  let cursor = 0;
+  let inString = startsInString;
+  while (cursor < line.length) {
+    if (!inString) {
+      const quote = line.indexOf("\"", cursor);
+      if (quote === -1) return out + line.slice(cursor);
+      out += line.slice(cursor, quote + 1);
+      cursor = quote + 1;
+      inString = true;
+      continue;
+    }
+    let end = cursor;
+    while (end < line.length && line[end] !== "\"") end += line[end] === "\\" ? 2 : 1;
+    end = Math.min(end, line.length);
+    out += redactJsonStringBody(line.slice(cursor, end), redact);
+    if (end < line.length) out += "\"";
+    cursor = end + 1;
+    inString = false;
+  }
+  return out;
+}
+
+/** A page that starts mid-record begins inside a string literal: `…text","seq":3}`. */
+function startsInsideJsonString(line: string) {
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] === "\\") {
+      index += 1;
+    } else if (line[index] === "\"") {
+      return /^(?:,"|:|\})/.test(line.slice(index + 1));
+    }
+  }
+  return false;
+}
+
+// Levels of JSON nesting walked below a log record: the stored chunk, the ACP
+// event it carries (`acpx.tool_call` and its `text`), then JSON printed by the
+// tool itself. Deeper material only gets the plain-text passes.
+const MAX_NESTED_RUN_LOG_DEPTH = 3;
+const ESCAPED_JSON_STRING_LITERAL_RE = /"((?:[^"\\\n]|\\.)*)"/g;
+
+/** Redact the decoded text of JSON string literals that carry escapes (pretty-printed JSON, quoted dumps). */
+function redactEscapedJsonStringLiterals(text: string, redact: (text: string) => string): string {
+  if (!text.includes("\\")) return text;
+  return text.replace(ESCAPED_JSON_STRING_LITERAL_RE, (match, body: string) =>
+    body.includes("\\") ? `"${redactJsonStringBody(body, redact)}"` : match);
+}
+
+function redactRunLogContentAt(
+  content: string,
+  redact: (text: string) => string,
+  depth: number,
+  pageStart: boolean,
+): string {
+  // Decoded strings are walked again: an ACP chunk is itself a JSON event
+  // whose tool output is escaped a second time.
+  const redactDecoded = (text: string) => depth > 0
+    ? redactRunLogContentAt(text, redact, depth - 1, false)
+    : redact(text);
+  const redactPlain = (text: string) => redact(depth > 0 ? redactEscapedJsonStringLiterals(text, redactDecoded) : text);
+  const lines = content.split("\n");
+  const out: string[] = [];
+  let plain: string[] = [];
+  const flushPlain = () => {
+    if (plain.length > 0) out.push(redactPlain(plain.join("\n")));
+    plain = [];
+  };
+  lines.forEach((line, index) => {
+    if (line.startsWith("{\"")) {
+      flushPlain();
+      out.push(redactJsonRecordLine(line, false, redactDecoded));
+    } else if (index === 0 && pageStart && startsInsideJsonString(line)) {
+      out.push(redactJsonRecordLine(line, true, redactDecoded));
+    } else {
+      plain.push(line);
+    }
+  });
+  flushPlain();
+  return out.join("\n");
+}
+
+/**
+ * Apply `redact` to the text a run log actually carries (ACC-3241). The log
+ * store writes NDJSON records (run-log-store.ts) whose tool output is
+ * JSON-escaped inside string fields, and an ACP chunk is itself a JSON event,
+ * so redaction runs on the decoded text of each string literal, nested
+ * records included (bounded depth), and every record is re-encoded, staying
+ * valid JSON. Records cut by the page window (`offset` / `limitBytes`) are
+ * handled the same way. Consecutive lines that are not records are redacted
+ * together as plain text, so multi-line material (PEM blocks) still matches.
+ * Content the redaction leaves unchanged keeps its original bytes.
+ */
+export function redactRunLogContent(
+  content: string,
+  redact: (text: string) => string,
+  options: { pageStart?: boolean } = {},
+): string {
+  return redactRunLogContentAt(content, redact, MAX_NESTED_RUN_LOG_DEPTH, options.pageStart ?? true);
 }

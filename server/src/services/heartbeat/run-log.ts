@@ -1,5 +1,5 @@
 import { appendWithByteCap, MAX_EXCERPT_BYTES, parseObject } from "../../adapters/utils.js";
-import { redactRunLogText } from "../../redaction.js";
+import { redactRunLogContent, redactRunLogText } from "../../redaction.js";
 
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
 const MAX_RUN_EVENT_PAYLOAD_STRING_CHARS = 16 * 1024;
@@ -108,7 +108,13 @@ export function compactRunLogChunk(
   chunk: string,
   maxChars = MAX_PERSISTED_LOG_CHUNK_CHARS,
 ) {
-  const normalized = redactRunLogText(redactInlineBase64ImageData(chunk));
+  // The raw pass keeps field-name rules that need the escaped JSON context;
+  // the decoded pass reaches tool output nested in an ACP event (ACC-3241).
+  const normalized = redactRunLogContent(
+    redactRunLogText(redactInlineBase64ImageData(chunk)),
+    redactRunLogText,
+    { pageStart: false },
+  );
   if (normalized.length <= maxChars) return normalized;
 
   const headChars = Math.max(0, Math.floor(maxChars * 0.6));

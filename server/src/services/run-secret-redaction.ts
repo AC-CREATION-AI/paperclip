@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companySecrets, companySecretVersions, heartbeatRuns } from "@paperclipai/db";
-import { REDACTED_EVENT_VALUE, redactSecretFamilyPatterns } from "../redaction.js";
+import { REDACTED_EVENT_VALUE, redactRunLogContent, redactSecretFamilyPatterns } from "../redaction.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import type { StoredSecretVersionMaterial } from "../secrets/types.js";
 import { credentialAccessConnectionNameSql } from "./credential-access-visibility.js";
@@ -216,93 +216,6 @@ function redactPartialMatchesInText(text: string, index: PartialSecretIndex): st
   return maskSpans(text, spans);
 }
 
-/**
- * Decode a JSON string body, redact the decoded text and re-encode it. A body
- * the redaction leaves unchanged keeps its original bytes. A body cut by the
- * page window may end inside an escape sequence; that tail is kept raw.
- */
-function redactJsonStringBody(body: string, redact: (text: string) => string): string {
-  for (let cut = body.length; cut >= Math.max(0, body.length - 6); cut -= 1) {
-    let decoded: string;
-    try {
-      decoded = JSON.parse(`"${body.slice(0, cut)}"`) as string;
-    } catch {
-      continue;
-    }
-    const redacted = redact(decoded);
-    return redacted === decoded ? body : `${JSON.stringify(redacted).slice(1, -1)}${body.slice(cut)}`;
-  }
-  return redact(body);
-}
-
-/** Redact every string literal of a (possibly cut) JSON record line. */
-function redactJsonRecordLine(line: string, startsInString: boolean, redact: (text: string) => string): string {
-  let out = "";
-  let cursor = 0;
-  let inString = startsInString;
-  while (cursor < line.length) {
-    if (!inString) {
-      const quote = line.indexOf("\"", cursor);
-      if (quote === -1) return out + line.slice(cursor);
-      out += line.slice(cursor, quote + 1);
-      cursor = quote + 1;
-      inString = true;
-      continue;
-    }
-    let end = cursor;
-    while (end < line.length && line[end] !== "\"") end += line[end] === "\\" ? 2 : 1;
-    end = Math.min(end, line.length);
-    out += redactJsonStringBody(line.slice(cursor, end), redact);
-    if (end < line.length) out += "\"";
-    cursor = end + 1;
-    inString = false;
-  }
-  return out;
-}
-
-/** A page that starts mid-record begins inside a string literal: `…text","seq":3}`. */
-function startsInsideJsonString(line: string) {
-  for (let index = 0; index < line.length; index += 1) {
-    if (line[index] === "\\") {
-      index += 1;
-    } else if (line[index] === "\"") {
-      return /^(?:,"|:|\})/.test(line.slice(index + 1));
-    }
-  }
-  return false;
-}
-
-/**
- * Apply `redact` to the text a served run log actually carries (ACC-3241).
- * The log store writes NDJSON records (run-log-store.ts) whose tool output is
- * JSON-escaped inside string fields, so redaction runs on each decoded string
- * literal and the record is re-encoded, staying valid JSON. Records cut by the
- * page window (`offset` / `limitBytes`) are handled the same way. Consecutive
- * lines that are not records are redacted together as plain text, so
- * multi-line material (PEM blocks) still matches.
- */
-export function redactRunLogContent(content: string, redact: (text: string) => string): string {
-  const lines = content.split("\n");
-  const out: string[] = [];
-  let plain: string[] = [];
-  const flushPlain = () => {
-    if (plain.length > 0) out.push(redact(plain.join("\n")));
-    plain = [];
-  };
-  lines.forEach((line, index) => {
-    if (line.startsWith("{\"")) {
-      flushPlain();
-      out.push(redactJsonRecordLine(line, false, redact));
-    } else if (index === 0 && startsInsideJsonString(line)) {
-      out.push(redactJsonRecordLine(line, true, redact));
-    } else {
-      plain.push(line);
-    }
-  });
-  flushPlain();
-  return out.join("\n");
-}
-
 export function createRunSecretRedactionRegistry(db: Db) {
   const provider = getSecretProvider("local_encrypted");
 
@@ -420,8 +333,8 @@ export function createRunSecretRedactionRegistry(db: Db) {
      * values of the secrets bound to the run's agent (env injection and agent
      * access), fragments of those known values, every stored company secret
      * version matched by fingerprint, and the secret family patterns. The
-     * passes run on the decoded text of each NDJSON record, not on its
-     * JSON-escaped form. Resolved values are request-scoped and never
+     * passes run on the decoded text of each NDJSON record and of the JSON
+     * nested in it (ACP events), not on its JSON-escaped form. Resolved values are request-scoped and never
      * displayed; the fingerprint pass compares sha256 digests only.
      */
     redactRunLog: async <T>(

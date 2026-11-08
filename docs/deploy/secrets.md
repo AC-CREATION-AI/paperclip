@@ -538,10 +538,22 @@ secret value to surface after resolution. Two server-side controls apply to
   values, and JWTs). Masking is by value shape, not by header or variable
   name. The log is NDJSON: redaction runs on the decoded text of each
   record's string fields, records cut by the page window included, and the
-  served records stay valid JSON.
+  served records stay valid JSON. Nested JSON is decoded too, up to three
+  levels below the record: an ACP chunk (`claude_local` with `engine: acp`)
+  is itself an `acpx.*` event whose `text` holds the tool output, escaped a
+  second time, and that output may print JSON of its own (an escaped string
+  value of pretty-printed JSON is decoded as well).
 - **Redaction at write time.** Chunks are stored after the generic
-  sensitive-text pass and the same family patterns. Family patterns apply to
-  run logs only; agent comments and other prose keep the generic pass.
+  sensitive-text pass and the same family patterns, applied to the raw chunk
+  and again to its decoded nested JSON, so a PEM block or a family token in
+  ACP tool output is not stored in clear. The write path does not know the
+  run's secret values: those are masked when the log is served. Family
+  patterns apply to run logs only; agent comments and other prose keep the
+  generic pass.
+- **Not covered.** A PEM key flattened onto one line (`echo $KEY` without
+  quotes) is masked only when its value is bound to the run or its agent. The
+  values of a deleted secret are no longer masked: deletion removes its
+  stored versions and their fingerprints.
 - **Access control.** The log route answers only to the run's own agent
   identity and to board principals (operators, instance admins). Any other
   agent of the company receives `403`. A run the caller cannot see at all

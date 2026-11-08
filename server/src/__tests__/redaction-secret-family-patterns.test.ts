@@ -47,6 +47,11 @@ describe("secret family patterns (ACC-3241)", () => {
       .toBe(`-----BEGIN OPENSSH PRIVATE KEY-----\n${REDACTED_EVENT_VALUE}\n-----END OPENSSH PRIVATE KEY-----`);
   });
 
+  it("leaves a lone PEM header unchanged so JSON-escaped text stays decodable", () => {
+    const escaped = JSON.stringify("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA");
+    expect(redactSecretFamilyPatterns(escaped)).toBe(escaped);
+  });
+
   it("masks the password part of credential URLs", () => {
     const out = redactSecretFamilyPatterns("connect postgresql://admin:hunter2secret@db.internal:5432/app");
     expect(out).toBe(`connect postgresql://admin:${REDACTED_EVENT_VALUE}@db.internal:5432/app`);

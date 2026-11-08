@@ -250,3 +250,111 @@ describe("run log secret redaction on served NDJSON records (ACC-3241 rework)", 
     for (const line of PEM_BODY) expect(out.content).not.toContain(line);
   });
 });
+
+// A claude_local / `engine: acp` run log: each stdout chunk is itself a JSON
+// event (acpx-engine/execute.ts) whose `text` carries the tool output, so the
+// served log escapes that output twice.
+function acpxToolCall(text: string) {
+  return `${JSON.stringify({
+    type: "acpx.tool_call",
+    name: "Terminal",
+    toolCallId: "call-1",
+    status: "completed",
+    text,
+  })}\n`;
+}
+
+function toolTexts(content: string) {
+  return chunks(content).map((chunk) => (JSON.parse(chunk) as { text: string }).text);
+}
+
+describe("run log secret redaction on ACP run logs (ACC-3241, output escaped twice)", () => {
+  it("masks a bound PEM key printed by a tool", async () => {
+    resolveBoundValues.mockResolvedValueOnce([PEM]);
+    const { registry, run } = fixture({});
+    const out = await registry.redactRunLog("company-1", run, { content: ndjson(acpxToolCall(`$ cat key\n${PEM}`)) });
+    for (const line of PEM_BODY) expect(out.content).not.toContain(line);
+    expect(toolTexts(out.content)).toEqual([`$ cat key\n${REDACTED_EVENT_VALUE}`]);
+  });
+
+  it("collapses an unknown PEM key by family pattern", async () => {
+    const { registry, run } = fixture({});
+    const out = await registry.redactRunLog("company-1", run, { content: ndjson(acpxToolCall(PEM)) });
+    for (const line of PEM_BODY) expect(out.content).not.toContain(line);
+    expect(toolTexts(out.content)[0]).toContain("-----BEGIN OPENSSH PRIVATE KEY-----");
+  });
+
+  it("masks family tokens at the start of a line of tool output", async () => {
+    const tokens = [
+      `pcp_board_${"362545d61d".repeat(5)}`,
+      `ghp_${"Qm3xK9pL".repeat(4)}`,
+      `sk-ant-${"ort01".repeat(8)}`,
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwcm9iZSJ9.c2lnbmF0dXJlLXByb2Jl",
+    ];
+    const { registry, run } = fixture({});
+    const out = await registry.redactRunLog("company-1", run, {
+      content: ndjson(acpxToolCall(`header\n${tokens.join("\n")}\n`)),
+    });
+    for (const token of tokens) expect(out.content).not.toContain(token);
+  });
+
+  it("masks a fingerprinted company secret on its own line of tool output", async () => {
+    const leaked = "7f3ab19c-4e5d-6a7b-8c9d-0e1f2a3b4c5d";
+    const { registry, run } = fixture({ versionRows: [{ fingerprintSha256: sha256(leaked) }] });
+    const out = await registry.redactRunLog("company-1", run, {
+      content: ndjson(acpxToolCall(`HOST=localhost\nAPI_TOKEN=${leaked}\nDEBUG=1\n`)),
+    });
+    expect(out.content).not.toContain(leaked);
+    expect(toolTexts(out.content)).toEqual([`HOST=localhost\nAPI_TOKEN=${REDACTED_EVENT_VALUE}\nDEBUG=1\n`]);
+  });
+
+  it("masks a PEM held in a JSON string of pretty-printed tool output", async () => {
+    const { registry, run } = fixture({});
+    const output = JSON.stringify({ name: "fleet_ssh_key", value: PEM }, null, 2);
+    const out = await registry.redactRunLog("company-1", run, { content: ndjson(acpxToolCall(output)) });
+    for (const line of PEM_BODY) expect(out.content).not.toContain(line);
+    expect(JSON.parse(toolTexts(out.content)[0]!)).toEqual({
+      name: "fleet_ssh_key",
+      value: `-----BEGIN OPENSSH PRIVATE KEY-----\n${REDACTED_EVENT_VALUE}\n-----END OPENSSH PRIVATE KEY-----\n`,
+    });
+  });
+
+  it("masks a record cut by the page limit", async () => {
+    const token = `sk-ant-${"ort01".repeat(8)}`;
+    const { registry, run } = fixture({});
+    const page = `${ndjson("first\n")}${ndjson(acpxToolCall(`probe\n${token} and more`), 2).slice(0, -12)}`;
+    const out = await registry.redactRunLog("company-1", run, { content: page });
+    expect(out.content).not.toContain(token);
+  });
+
+  it("masks at write time, before the chunk is stored", () => {
+    const token = `ghp_${"Qm3xK9pL".repeat(4)}`;
+    const stored = compactRunLogChunk(acpxToolCall(`$ cat key\n${PEM}${token}\n`));
+    for (const line of PEM_BODY) expect(stored).not.toContain(line);
+    expect(stored).not.toContain(token);
+    expect(JSON.parse(stored)).toMatchObject({ type: "acpx.tool_call", toolCallId: "call-1" });
+  });
+
+  it("masks through the full write -> store -> read pipeline", async () => {
+    const leaked = "7f3ab19c-4e5d-6a7b-8c9d-0e1f2a3b4c5d";
+    const { registry, run } = fixture({ versionRows: [{ fingerprintSha256: sha256(leaked) }] });
+    const stored = [`cat key\n${PEM}`, `HOST=localhost\nAPI_TOKEN=${leaked}\n`]
+      .map((text, index) => ndjson(compactRunLogChunk(acpxToolCall(text)), index + 1)).join("");
+    const out = await registry.redactRunLog("company-1", run, { content: stored });
+    for (const line of PEM_BODY) expect(out.content).not.toContain(line);
+    expect(out.content).not.toContain(leaked);
+  });
+
+  it("leaves ordinary ACP records byte-identical, on read and on write", async () => {
+    const events = [
+      acpxToolCall("total 8\ndrwxr-xr-x 2 pcagent pcagent 4096 Nov  8 build\n\"quoted\" \\ path\n"),
+      `${JSON.stringify({ type: "acpx.text_delta", text: "Je relance les tests.\n" })}\n`,
+      acpxToolCall(JSON.stringify({ ok: true, items: [{ id: "a1", note: "line\nbreak" }] }, null, 2)),
+    ];
+    const { registry, run } = fixture({});
+    const content = events.map((event, index) => ndjson(event, index + 1)).join("");
+    const out = await registry.redactRunLog("company-1", run, { content });
+    expect(out.content).toBe(content);
+    for (const event of events) expect(compactRunLogChunk(event)).toBe(event);
+  });
+});
