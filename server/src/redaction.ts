@@ -397,6 +397,15 @@ const SECRET_TEXT_HINTS = [
   "ghu_",
   "ghs_",
   "ghr_",
+  "github_pat_",
+  "glpat-",
+  "xox",
+  "akia",
+  "aiza",
+  "pcp_",
+  "eyj",
+  "-----begin",
+  "://",
 ] as const;
 export const REDACTED_EVENT_VALUE = "***REDACTED***";
 
@@ -1009,9 +1018,40 @@ export function redactAgentAdapterConfig(
   return { ...(redactEventPayload(rest) ?? {}), env: redactedEnv };
 }
 
+/**
+ * Secret family patterns (ACC-3241), shared with the adapter-side redactors.
+ * They cover material whose shape betrays it even when no known value and no
+ * secret-named field is present: PEM private key blocks (including truncated
+ * ones), provider-prefixed keys, credential URLs, authorization headers and
+ * JWTs. Masking is by value shape, never by header or variable name (C7): the
+ * same token is masked under `X-Paperclip-Api-Key`, `X-Board-Key` or any other
+ * label.
+ */
+const PEM_PRIVATE_KEY_BLOCK_RE =
+  /-----BEGIN ([A-Z0-9 ]*?)PRIVATE KEY-----(?:(?:\r?\n(?:[A-Za-z0-9+/=]{6,}|\*\*\*REDACTED\*\*\*))(?=\r?\n|$))*(?:\r?\n-----END \1PRIVATE KEY-----)?/g;
+const SECRET_FAMILY_TOKEN_RE =
+  /(?<![A-Za-z0-9_-])(?:sk-(?:ant-|or-v1-|proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|pcp_[A-Za-z0-9_.=-]{12,})/g;
+const JWT_TOKEN_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+const CREDENTIAL_URL_RE = /\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s:/@'"`]*):([^\s@/'"`]+)@/g;
+const FAMILY_AUTHORIZATION_RE = /\b(Bearer|Basic|Token)(\s+)([A-Za-z0-9._~+/=-]{12,})/g;
+
+export function redactSecretFamilyPatterns(input: string): string {
+  return input
+    .replace(PEM_PRIVATE_KEY_BLOCK_RE, (match, kind: string) => {
+      const footer = match.includes("-----END ")
+        ? `\n-----END ${kind}PRIVATE KEY-----`
+        : "";
+      return `-----BEGIN ${kind}PRIVATE KEY-----\n${REDACTED_EVENT_VALUE}${footer}`;
+    })
+    .replace(FAMILY_AUTHORIZATION_RE, (_match, scheme: string, space: string) => `${scheme}${space}${REDACTED_EVENT_VALUE}`)
+    .replace(CREDENTIAL_URL_RE, (_match, scheme: string, user: string) => `${scheme}${user}:${REDACTED_EVENT_VALUE}@`)
+    .replace(SECRET_FAMILY_TOKEN_RE, REDACTED_EVENT_VALUE)
+    .replace(JWT_TOKEN_RE, REDACTED_EVENT_VALUE);
+}
+
 export function redactSensitiveText(input: string): string {
   if (!maybeContainsSecretText(input)) return input;
-  return redactCommandText(
+  return redactSecretFamilyPatterns(redactCommandText(
     redactStandaloneBearerCredentials(redactAuthorizationCredentials(input))
       .replace(JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
       .replace(
@@ -1019,5 +1059,5 @@ export function redactSensitiveText(input: string): string {
         `$1${REDACTED_EVENT_VALUE}$2`,
       ),
     REDACTED_EVENT_VALUE,
-  );
+  ));
 }

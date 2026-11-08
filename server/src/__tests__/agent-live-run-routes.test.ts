@@ -45,6 +45,7 @@ const mockRunSecretRedactionRegistry = vi.hoisted(() => ({
   redactForRun: vi.fn(
     async (_companyId: string, _runId: string, value: unknown) => value,
   ),
+  redactRunLog: vi.fn(async (_companyId: string, _run: unknown, value: unknown) => value),
 }));
 
 const mockProviderTraceStore = vi.hoisted(() => ({
@@ -376,6 +377,7 @@ describe("agent live run routes", () => {
       companyId: "company-1",
       scopeKind: "company",
       issueId: null,
+      agentId: "agent-1",
       logStore: "local_file",
       logRef: "logs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.ndjson",
     });
@@ -629,6 +631,7 @@ describe("agent live run routes", () => {
         companyId: "company-1",
       scopeKind: "company",
       issueId: null,
+        agentId: "agent-1",
         logStore: "local_file",
         logRef: "logs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.ndjson",
       },
@@ -646,6 +649,49 @@ describe("agent live run routes", () => {
       content: "chunk",
       nextOffset: 5,
     });
+  });
+
+  it("serves run log content through redactRunLog (ACC-3241)", async () => {
+    const res = await requestApp(await createApp(), (baseUrl) =>
+      request(baseUrl).get("/api/heartbeat-runs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/log"),
+    );
+    expect(res.status).toBe(200);
+    expect(mockRunSecretRedactionRegistry.redactRunLog).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", agentId: "agent-1" }),
+      expect.objectContaining({ content: "chunk" }),
+    );
+  });
+
+  it("allows the run's own agent identity to read its log (ACC-3241)", async () => {
+    const actor = { type: "agent", companyId: "company-1", agentId: "agent-1", source: "agent_key" };
+    const app = await createApp({}, actor);
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get("/api/heartbeat-runs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/log"),
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockHeartbeatService.readLog).toHaveBeenCalled();
+  });
+
+  it("returns 403 to a different agent identity (ACC-3241, two identities)", async () => {
+    const actor = { type: "agent", companyId: "company-1", agentId: "22222222-2222-4222-8222-222222222222", source: "agent_key" };
+    const app = await createApp({}, actor);
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get("/api/heartbeat-runs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/log"),
+    );
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Run log");
+    expect(mockHeartbeatService.readLog).not.toHaveBeenCalled();
+    expect(mockRunSecretRedactionRegistry.redactRunLog).not.toHaveBeenCalled();
+  });
+
+  it("keeps board operators reading run logs (ACC-3241)", async () => {
+    const actor = { type: "board", userId: "operator-1", companyIds: ["company-1"], source: "session", isInstanceAdmin: false };
+    const app = await createApp({}, actor);
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).get("/api/heartbeat-runs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/log"),
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
   });
 
   it.each(["skill_test", "task_bridge"])(

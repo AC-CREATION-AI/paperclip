@@ -135,7 +135,7 @@ import {
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PAPERCLIP_CORE_SKILL_KEYS } from "../services/company-skills.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
-import { assertAuthenticated, assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
+import { assertAuthenticated, assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasBoardOrgAccess, hasCompanyAccess } from "./authz.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
 import { isLoginCommandSupportedAdapterType } from "../services/login-command.js";
 import {
@@ -822,6 +822,30 @@ export function agentRoutes(
   ) {
     if (await actorCanReadRun(req, run)) return true;
     res.status(404).json({ error: notFoundMessage });
+    return false;
+  }
+
+  /**
+   * Raw run logs are the most sensitive run surface: they carry tool output
+   * verbatim. ACC-3241 restricts them to the run's own agent identity and to
+   * board principals (operators, instance admins), instead of every agent of
+   * the company. The run's visibility check still runs first, so a run the
+   * actor cannot see at all keeps answering 404; this gate answers 403.
+   */
+  async function canActorReadRunLog(req: Request, run: { companyId: string; agentId?: string | null }) {
+    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return true;
+    if (req.actor.type === "agent") {
+      return Boolean(req.actor.agentId && run.agentId && req.actor.agentId === run.agentId);
+    }
+    if (req.actor.type === "board") {
+      return hasBoardOrgAccess(req) && Boolean(req.actor.companyIds?.includes(run.companyId));
+    }
+    return false;
+  }
+
+  async function assertRunLogReadAllowed(req: Request, res: Response, run: { companyId: string; agentId?: string | null }) {
+    if (await canActorReadRunLog(req, run)) return true;
+    res.status(403).json({ error: "Run log is restricted to the run's agent and board operators" });
     return false;
   }
 
@@ -7674,6 +7698,7 @@ export function agentRoutes(
     if (!run) return;
     if (!(await assertRunTelemetryReadAllowed(req, res, run.companyId))) return;
     if (!(await assertRunReadAllowed(req, res, run))) return;
+    if (!(await assertRunLogReadAllowed(req, res, run))) return;
 
     const offset = Number(req.query.offset ?? 0);
     const limitBytes = readRunLogLimitBytes(req.query.limitBytes);
@@ -7689,7 +7714,7 @@ export function agentRoutes(
       });
 
       res.set("Cache-Control", "no-cache, no-store");
-      res.json(await runRedactions.redactForRun(run.companyId, run.id, result));
+      res.json(await runRedactions.redactRunLog(run.companyId, run, result));
     } finally {
       res.off("close", cancelRead);
     }

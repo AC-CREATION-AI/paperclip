@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, like, ne, notInArray, notLike, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -1861,6 +1861,113 @@ export function secretService(db: Db | DbTransaction) {
         resolvedVersion: versionSelector === "latest" ? secret.latestVersion : versionSelector,
       }];
     }).sort((left, right) => left.key.localeCompare(right.key));
+  }
+
+  /**
+   * Current plaintext values of every secret bound to a run's agent - env
+   * injection bindings, agent-access bindings, and the run's secret manifest -
+   * for server-side run-log redaction (ACC-3241).
+   *
+   * This is a redaction scan, not a consumer read: it records no secret access
+   * events and does not refresh `lastResolvedAt`. The return value must only be
+   * used to mask text (never displayed or logged), is scoped to the current
+   * request, and is tracked by sha256 fingerprint for deduplication. Values
+   * still verify against the stored version fingerprint before use; a mismatch
+   * is tolerated because failing to mask is worse than masking a stale value.
+   */
+  async function resolveSecretValuesForRunRedaction(
+    companyId: string,
+    input: { agentId: string | null; runId: string },
+  ): Promise<string[]> {
+    if (!input.agentId || !isUuidLike(input.runId)) return [];
+    const run = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.id, input.runId),
+        eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.agentId, input.agentId),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!run) return [];
+
+    const runContext = asRecord(run.contextSnapshot) ?? {};
+    const manifest = (asRecord(runContext.paperclipSecrets) ?? {}).manifest;
+    const manifestBindingIds = Array.isArray(manifest)
+      ? manifest.flatMap((entry) => {
+          const bindingId = (asRecord(entry) ?? {}).bindingId;
+          return typeof bindingId === "string" ? [bindingId] : [];
+        })
+      : [];
+    const [directBindings, runtimeBindings] = await Promise.all([
+      db.select().from(companySecretBindings).where(and(
+        eq(companySecretBindings.companyId, companyId),
+        eq(companySecretBindings.targetType, "agent"),
+        eq(companySecretBindings.targetId, input.agentId),
+        or(
+          like(companySecretBindings.configPath, "env.%"),
+          like(companySecretBindings.configPath, `${AGENT_ACCESS_CONFIG_PATH_PREFIX}%`),
+        ),
+      )),
+      manifestBindingIds.length > 0
+        ? db.select().from(companySecretBindings).where(and(
+            eq(companySecretBindings.companyId, companyId),
+            inArray(companySecretBindings.id, manifestBindingIds),
+          ))
+        : Promise.resolve([]),
+    ]);
+    const bindings = [...new Map([...directBindings, ...runtimeBindings].map((binding) => [binding.id, binding])).values()];
+    if (bindings.length === 0) return [];
+
+    const secrets = await db
+      .select()
+      .from(companySecrets)
+      .where(and(
+        eq(companySecrets.companyId, companyId),
+        eq(companySecrets.scope, "company"),
+        eq(companySecrets.status, "active"),
+        inArray(companySecrets.id, [...new Set(bindings.map((binding) => binding.secretId))]),
+      ));
+
+    const values: string[] = [];
+    for (const secret of secrets) {
+      const binding = bindings.find((entry) => entry.secretId === secret.id);
+      if (!binding) continue;
+      const version = binding.versionSelector === "latest" ? secret.latestVersion : Number(binding.versionSelector);
+      if (!Number.isInteger(version) || version < 1) continue;
+      try {
+        const versionRow = await getSecretVersion(secret.id, version);
+        if (!versionRow || versionRow.status === "disabled" || versionRow.status === "destroyed" || versionRow.revokedAt) continue;
+        const providerId = secret.provider as SecretProvider;
+        const provider = getSecretProvider(providerId);
+        const providerConfig = await getSelectableRuntimeProviderConfig({
+          companyId,
+          provider: providerId,
+          providerConfigId: secret.providerConfigId,
+        });
+        const value = await provider.resolveVersion({
+          material: versionRow.material as Record<string, unknown>,
+          externalRef: secret.externalRef,
+          providerVersionRef: versionRow.providerVersionRef,
+          providerConfig,
+          context: {
+            companyId,
+            secretId: secret.id,
+            secretKey: secret.key,
+            version,
+          },
+        });
+        if (typeof value !== "string" || value.length === 0) continue;
+        const resolvedFingerprint = createHash("sha256").update(value).digest("hex");
+        if (resolvedFingerprint !== versionRow.fingerprintSha256 && resolvedFingerprint !== versionRow.valueSha256) {
+          logger.warn({ secretId: secret.id, companyId }, "run-log redaction fingerprint mismatch for resolved secret");
+        }
+        values.push(value);
+      } catch (error) {
+        logger.warn({ err: error, secretId: secret.id, companyId }, "run-log redaction secret resolution failed");
+      }
+    }
+    return values;
   }
 
   async function resolveSecretVersion(
@@ -4617,6 +4724,7 @@ export function secretService(db: Db | DbTransaction) {
     resolveSecretVersion,
     resolveSecretValueForAgentAccess,
     listAgentSecretAccess,
+    resolveSecretValuesForRunRedaction,
     resolveSecretValueForEphemeralAccess,
     resolveSecretValueForSandboxCleanup,
     resolveSecretValueForDeviceLoginCheck,
