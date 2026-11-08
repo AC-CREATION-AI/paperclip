@@ -5,9 +5,9 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readPaperclipSkillSyncPreference, writePaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, desc, eq, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, builtInManagedResources, companies, issueThreadInteractions, issues, routines, routineTriggers, fileStorageDb } from "@paperclipai/db";
+import { activityLog, agents, builtInManagedResources, companies, issueThreadInteractions, issues, routineRevisions, routines, routineTriggers, fileStorageDb } from "@paperclipai/db";
 import { agentHarnessType, paperclipRunnerProfileForHarness, agentRunner, syncRoutineVariablesWithTemplate, type AgentRunnerChoice } from "@paperclipai/shared";
 import type { Agent, Approval, CompanySkill, PermissionKey, Routine, RoutineTrigger, RoutineVariable } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
@@ -26,7 +26,7 @@ import {
   withBuiltInAgentMarker,
 } from "../lib/built-in-agent-metadata.js";
 import { companySkillService } from "./company-skills.js";
-import { routineService } from "./routines.js";
+import { resolveCompanyDefaultResponsibleUserId, routineService } from "./routines.js";
 import { accessService } from "./access.js";
 import { listAdapterModels } from "../adapters/registry.js";
 import {
@@ -490,6 +490,59 @@ const ROOT_AGENT_DEFAULT_CHANGE_GRANTS: PermissionKey[] = ["agents:configure", "
 const BUILT_IN_AGENT_DEFAULT_GRANTS: Record<string, PermissionKey[]> = {
   "reflection-coach": ["agents:suggest-changes", "skills:suggest-changes"],
 };
+
+// Bundle provisioning runs as this synthetic actor. It is not a company member,
+// so it must stay an activity-log label only: persisted as a routine's
+// responsible user, it denied every run descending from that routine its own
+// issue writes (setup_failed / RESPONSIBLE_USER_UNAVAILABLE).
+const BUILT_IN_BUNDLES_ACTOR_ID = "built-in-bundles";
+
+// A bundle routine is owned by a real user like any other routine. Prefer the
+// user who enables or runs it, then the company default responsible user; the
+// synthetic bundle actor is never a candidate.
+async function requireBundleRoutineResponsibleUserId(db: Db, companyId: string, actorUserId?: string | null) {
+  const requested = actorUserId?.trim() || null;
+  const responsibleUserId = requested && requested !== BUILT_IN_BUNDLES_ACTOR_ID
+    ? requested
+    : await resolveCompanyDefaultResponsibleUserId(db, companyId);
+  if (!responsibleUserId || responsibleUserId === BUILT_IN_BUNDLES_ACTOR_ID) {
+    throw unprocessable("Built-in routine requires a responsible user");
+  }
+  return responsibleUserId;
+}
+
+// Rewrites a routine installed by an older release, which persisted the
+// synthetic bundle actor as its responsible user. Only rows still naming the
+// marker are touched, so operator customizations — including a responsible user
+// they picked — survive. The routine row and its revisions are written
+// together, so rewriting the marker also fixes the revision that seeds runs.
+async function repairLegacyBundleRoutineResponsibleUser(
+  db: Db,
+  routine: { id: string; companyId: string },
+  responsibleUserId: string,
+) {
+  const [repaired] = await db
+    .update(routines)
+    .set({ responsibleUserId, updatedAt: new Date() })
+    .where(and(
+      eq(routines.companyId, routine.companyId),
+      eq(routines.id, routine.id),
+      eq(routines.responsibleUserId, BUILT_IN_BUNDLES_ACTOR_ID),
+    ))
+    .returning({ id: routines.id });
+  if (!repaired) return;
+  await db
+    .update(routineRevisions)
+    .set({
+      responsibleUserId,
+      snapshot: sql`jsonb_set("snapshot", '{routine,responsibleUserId}', to_jsonb(${responsibleUserId}::text))`,
+    })
+    .where(and(
+      eq(routineRevisions.companyId, routine.companyId),
+      eq(routineRevisions.routineId, routine.id),
+      eq(routineRevisions.responsibleUserId, BUILT_IN_BUNDLES_ACTOR_ID),
+    ));
+}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1396,7 +1449,9 @@ export function builtInAgentService(db: Db) {
     };
   }
 
-  async function requireBundleRoutine(companyId: string, key: string, routineKey: string) {
+  // Single choke point for bundle-routine mutations (run, schedule), so a
+  // routine left behind by an older release is repaired before it is used.
+  async function requireBundleRoutine(companyId: string, key: string, routineKey: string, actorUserId?: string | null) {
     const definition = requireBuiltInAgentDefinition(key);
     if (!definition.bundle || definition.bundle.routine.routineKey !== routineKey) {
       throw notFound("Built-in routine not found");
@@ -1406,6 +1461,8 @@ export function builtInAgentService(db: Db) {
     if (!agent) throw notFound("Built-in agent is not provisioned");
     const current = await getRoutineByBinding(companyId, definition);
     if (!current.routine) throw notFound("Built-in routine not found");
+    const responsibleUserId = await requireBundleRoutineResponsibleUserId(db, companyId, actorUserId);
+    await repairLegacyBundleRoutineResponsibleUser(db, current.routine, responsibleUserId);
     const schedule = current.triggers.find((trigger) => trigger.kind === "schedule") ?? null;
     return { definition, agent, routine: current.routine, triggers: current.triggers, schedule };
   }
@@ -1417,9 +1474,18 @@ export function builtInAgentService(db: Db) {
     return resumed as Agent;
   }
 
-  async function createOrResetRoutine(agent: Agent, definition: BuiltInAgentDefinition, existing: Routine | null, mode: "reconcile" | "reset") {
+  async function createOrResetRoutine(
+    agent: Agent,
+    definition: BuiltInAgentDefinition,
+    existing: Routine | null,
+    mode: "reconcile" | "reset",
+    responsibleUserId: string,
+  ) {
     const routine = definition.bundle!.routine;
-    const actor = { agentId: null, userId: "built-in-bundles" };
+    // Automatic bundle provisioning is unattributed system work: no user id
+    // belongs in the provenance columns. The routine is still owned by a real
+    // resolved user, so runs descending from it can read their own issue.
+    const actor = { agentId: null, userId: null, actorResponsibleUserId: responsibleUserId };
     const nextRoutine = existing
       ? await routineSvc.update(existing.id, {
         title: routine.title,
@@ -1477,7 +1543,7 @@ export function builtInAgentService(db: Db) {
     await logActivity(db, {
       companyId: agent.companyId,
       actorType: "system",
-      actorId: "built-in-bundles",
+      actorId: BUILT_IN_BUNDLES_ACTOR_ID,
       action: mode === "reset" ? "built_in_agent.routine_reset" : "built_in_agent.routine_reconciled",
       entityType: "routine",
       entityId: nextRoutine.id,
@@ -1490,10 +1556,24 @@ export function builtInAgentService(db: Db) {
     return nextRoutine;
   }
 
-  async function materializeRoutine(agent: Agent, definition: BuiltInAgentDefinition, mode: "reconcile" | "reset") {
+  async function materializeRoutine(
+    agent: Agent,
+    definition: BuiltInAgentDefinition,
+    mode: "reconcile" | "reset",
+    responsibleUserIdHint?: string | null,
+  ) {
     const bundle = definition.bundle!;
     const stock = routineDefaultsHash(bundle.routine, bundle.routine.triggers);
     const { binding, routine, triggers } = await getRoutineByBinding(agent.companyId, definition);
+    const responsibleUserId = await requireBundleRoutineResponsibleUserId(
+      db,
+      agent.companyId,
+      responsibleUserIdHint,
+    );
+    // Repair before any write so a routine left behind by an older release gets
+    // a real owner even when no stock update is pending, and so a pending stock
+    // update cannot re-persist the marker.
+    if (routine) await repairLegacyBundleRoutineResponsibleUser(db, routine, responsibleUserId);
     const currentHash = routine ? routineDefaultsHash({
       title: routine.title,
       description: routine.description ?? "",
@@ -1516,7 +1596,7 @@ export function builtInAgentService(db: Db) {
       || currentState.stockStatus === "missing"
       || currentState.stockStatus === "stock_update_available";
     const nextRoutine = shouldWrite
-      ? await createOrResetRoutine(agent, definition, routine, mode)
+      ? await createOrResetRoutine(agent, definition, routine, mode, responsibleUserId)
       : routine!;
     await upsertManagedResourceBinding({
       companyId: agent.companyId,
@@ -1632,7 +1712,7 @@ export function builtInAgentService(db: Db) {
     const refreshedAfterSkill = await agentSvc.getById(agent.id) as Agent | null;
     if (!refreshedAfterSkill) throw notFound("Built-in agent not found");
     const routine = selected.has("routine")
-      ? await materializeRoutine(refreshedAfterSkill, definition, mode)
+      ? await materializeRoutine(refreshedAfterSkill, definition, mode, actor?.userId ?? null)
       : byKind.get("routine")!;
     return [instruction, skill, routine];
   }
@@ -2045,7 +2125,7 @@ export function builtInAgentService(db: Db) {
     enabled: boolean,
     actor: { agentId?: string | null; userId?: string | null; runId?: string | null } = {},
   ) {
-    const { definition, agent, routine, schedule } = await requireBundleRoutine(companyId, key, routineKey);
+    const { definition, agent, routine, schedule } = await requireBundleRoutine(companyId, key, routineKey, actor.userId ?? null);
     if (!schedule) throw notFound("Built-in routine schedule not found");
     if (enabled) {
       await ensureBuiltInAgentAssignable(agent);
@@ -2064,7 +2144,7 @@ export function builtInAgentService(db: Db) {
     routineKey: string,
     actor: { agentId?: string | null; userId?: string | null; runId?: string | null } = {},
   ) {
-    const { agent, routine } = await requireBundleRoutine(companyId, key, routineKey);
+    const { agent, routine } = await requireBundleRoutine(companyId, key, routineKey, actor.userId ?? null);
     await ensureBuiltInAgentAssignable(agent);
     return routineSvc.runRoutine(routine.id, { source: "manual" }, actor);
   }

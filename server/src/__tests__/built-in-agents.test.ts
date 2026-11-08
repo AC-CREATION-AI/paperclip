@@ -26,6 +26,7 @@ import {
   issueThreadInteractions,
   issues,
   principalPermissionGrants,
+  routineRevisions,
   routines,
   routineTriggers,
 } from "@paperclipai/db";
@@ -760,6 +761,153 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(coachGrantKeys).toEqual(expect.arrayContaining(["agents:suggest-changes", "skills:suggest-changes"]));
     expect(coachGrantKeys).not.toContain("agents:configure");
     expect(coachGrantKeys).not.toContain("skills:create");
+  });
+
+  it("resolves a real responsible user for bundle routines instead of the built-in-bundles marker", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await createAgentLifecycle(db).requestHire(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await builtInAgentService(db).ensure(companyId, "reflection-coach");
+
+    // Regression: bundle installs used to persist the synthetic "built-in-bundles"
+    // actor as the routine's responsible_user_id. No user or membership resolves
+    // for that marker, so every run descending from the routine was denied its
+    // own issue writes with RESPONSIBLE_USER_UNAVAILABLE. A freshly installed
+    // bundle routine must resolve a real responsible user like any other routine.
+    const [routine] = await db.select().from(routines).where(eq(routines.companyId, companyId));
+    expect(routine!.responsibleUserId).toBe("responsible-user");
+    expect(routine!.responsibleUserId).not.toBe("built-in-bundles");
+    // Automatic bundle provisioning stays unattributed; the marker never lands
+    // in a user-id provenance column either.
+    expect(routine!.createdByUserId).toBeNull();
+    expect(routine!.updatedByUserId).toBeNull();
+
+    // The revision snapshot feeds run seeding, so it records the same user.
+    const [revision] = await db
+      .select()
+      .from(routineRevisions)
+      .where(eq(routineRevisions.routineId, routine!.id));
+    expect(revision!.responsibleUserId).toBe("responsible-user");
+    expect((revision!.snapshot as { routine?: { responsibleUserId?: string | null } }).routine?.responsibleUserId)
+      .toBe("responsible-user");
+  });
+
+  it("repairs a legacy built-in-bundles responsible user without clobbering operator customizations", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: "responsible-user",
+      status: "active",
+    });
+    await createAgentLifecycle(db).requestHire(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    await builtIns.ensure(companyId, "reflection-coach");
+    const [installed] = await db.select().from(routines).where(eq(routines.companyId, companyId));
+
+    // Simulate a routine installed by an older release: the routine and its
+    // latest revision store the synthetic marker. The operator also customized
+    // the title, so the repair must not rewrite it back to stock.
+    await db
+      .update(routines)
+      .set({ responsibleUserId: "built-in-bundles", title: "Operator-customized title" })
+      .where(eq(routines.id, installed!.id));
+    await db
+      .update(routineRevisions)
+      .set({ responsibleUserId: "built-in-bundles" })
+      .where(eq(routineRevisions.id, installed!.latestRevisionId!));
+
+    // Reconcile detects the marker even though no stock update is pending and
+    // repairs the responsible user only.
+    await builtIns.ensure(companyId, "reflection-coach");
+
+    const [repaired] = await db.select().from(routines).where(eq(routines.id, installed!.id));
+    expect(repaired!.responsibleUserId).toBe("responsible-user");
+    expect(repaired!.title).toBe("Operator-customized title");
+    const [repairedRevision] = await db
+      .select()
+      .from(routineRevisions)
+      .where(eq(routineRevisions.id, repaired!.latestRevisionId!));
+    expect(repairedRevision!.responsibleUserId).toBe("responsible-user");
+    expect((repairedRevision!.snapshot as { routine?: { responsibleUserId?: string | null } }).routine?.responsibleUserId)
+      .toBe("responsible-user");
+  });
+
+  it("repairs a legacy built-in-bundles responsible user before running the bundle routine", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: "operator-user",
+      status: "active",
+    });
+    await createAgentLifecycle(db).requestHire(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    await builtIns.ensure(companyId, "reflection-coach");
+    const [installed] = await db.select().from(routines).where(eq(routines.companyId, companyId));
+    await db
+      .update(routines)
+      .set({ responsibleUserId: "built-in-bundles" })
+      .where(eq(routines.id, installed!.id));
+    await db
+      .update(routineRevisions)
+      .set({ responsibleUserId: "built-in-bundles" })
+      .where(eq(routineRevisions.id, installed!.latestRevisionId!));
+
+    // Keep the run in setup: this test covers the repair and the run seeding,
+    // not execution. The run rows it leaves behind are cleaned up below.
+    await lifecycleWorker.stop();
+    lifecycleWorker = configureAgentLifecycle(db, { requiredPluginIds: async () => [], runPlugin: async () => "complete", runHost: async () => "pending" });
+    try {
+      // A run of a still-poisoned routine must repair it first. The user who
+      // runs it wins over the company default, and the revision the run seeds
+      // from is repaired too — that is the path a scheduled run takes.
+      const run = await builtIns.runRoutine(companyId, "reflection-coach", "recent-agent-reflection", {
+        userId: "operator-user",
+      });
+      expect(run.status).toBe("issue_created");
+
+      const [repaired] = await db.select().from(routines).where(eq(routines.id, installed!.id));
+      expect(repaired!.responsibleUserId).toBe("operator-user");
+      const [repairedRevision] = await db
+        .select()
+        .from(routineRevisions)
+        .where(eq(routineRevisions.id, repaired!.latestRevisionId!));
+      expect(repairedRevision!.responsibleUserId).toBe("operator-user");
+      const [routineRun] = await db.select().from(routineRuns).where(eq(routineRuns.companyId, companyId));
+      expect(routineRun!.responsibleUserId).toBe("operator-user");
+      const [createdIssue] = await db.select().from(issues).where(eq(issues.companyId, companyId));
+      expect(createdIssue!.responsibleUserId).toBe("operator-user");
+    } finally {
+      await lifecycleWorker.stop();
+      await db.delete(routineRuns).where(eq(routineRuns.companyId, companyId));
+      await db.delete(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+      await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+      lifecycleWorker = configureAgentLifecycle(db, { requiredPluginIds: async () => [], runPlugin: async () => "complete", runHost: async () => "complete" });
+    }
   });
 
   it("recreates missing managed resource bindings idempotently during concurrent reconcile", async () => {
