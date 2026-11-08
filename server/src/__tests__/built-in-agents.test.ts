@@ -910,6 +910,120 @@ describeEmbeddedPostgres("built-in agents", () => {
     }
   });
 
+  async function poisonBundleRoutine(companyId: string, patch: Partial<typeof routines.$inferInsert> = {}) {
+    const [installed] = await db.select().from(routines).where(eq(routines.companyId, companyId));
+    await db
+      .update(routines)
+      .set({ responsibleUserId: "built-in-bundles", ...patch })
+      .where(eq(routines.id, installed!.id));
+    await db
+      .update(routineRevisions)
+      .set({ responsibleUserId: "built-in-bundles" })
+      .where(eq(routineRevisions.routineId, installed!.id));
+    return installed!;
+  }
+
+  async function expectNoMarkedRevisions(routineId: string, responsibleUserId: string) {
+    const revisions = await db.select().from(routineRevisions).where(eq(routineRevisions.routineId, routineId));
+    expect(revisions.length).toBeGreaterThan(0);
+    for (const revision of revisions) {
+      expect(revision.responsibleUserId).toBe(responsibleUserId);
+      expect((revision.snapshot as { routine?: { responsibleUserId?: string | null } }).routine?.responsibleUserId)
+        .toBe(responsibleUserId);
+    }
+  }
+
+  it("repairs a legacy built-in-bundles responsible user when the schedule is enabled", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const builtIns = builtInAgentService(db);
+    await builtIns.ensure(companyId, "reflection-coach");
+    const installed = await poisonBundleRoutine(companyId);
+
+    // Enabling the schedule hands the routine to the scheduler, which seeds
+    // runs from the latest revision: both must name the enabling user first.
+    const enabled = await builtIns.enableRoutineSchedule(companyId, "reflection-coach", "recent-agent-reflection", {
+      userId: "board-user",
+    });
+    expect(enabled.resources.find((resource) => resource.resourceKind === "routine")).toMatchObject({
+      scheduleEnabled: true,
+    });
+    const [repaired] = await db.select().from(routines).where(eq(routines.id, installed.id));
+    expect(repaired!.responsibleUserId).toBe("board-user");
+    await expectNoMarkedRevisions(installed.id, "board-user");
+  });
+
+  it("repairs a legacy built-in-bundles responsible user on reset instead of re-persisting it", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const builtIns = builtInAgentService(db);
+    await builtIns.ensure(companyId, "reflection-coach");
+    const installed = await poisonBundleRoutine(companyId, { title: "Operator-customized title" });
+
+    await builtIns.reset(companyId, "reflection-coach", { resources: ["routine"] }, instructionOperator);
+
+    // The reset restores stock defaults but the owner comes from the user who
+    // reset it, never from the marker the old release wrote.
+    const [reset] = await db.select().from(routines).where(eq(routines.id, installed.id));
+    expect(reset!.title).toBe("Review recent agent trajectories for coaching proposals");
+    expect(reset!.responsibleUserId).toBe("local-board");
+    await expectNoMarkedRevisions(installed.id, "local-board");
+  });
+
+  it("repairs marked revisions of a routine whose owner was already fixed", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    const builtIns = builtInAgentService(db);
+    await builtIns.ensure(companyId, "reflection-coach");
+    // A partial repair (or a manual fix of the routine row only) leaves the
+    // revisions marked; they follow the routine's owner, not the default.
+    const installed = await poisonBundleRoutine(companyId, { responsibleUserId: "operator-pick" });
+
+    await builtIns.ensure(companyId, "reflection-coach");
+
+    const [repaired] = await db.select().from(routines).where(eq(routines.id, installed.id));
+    expect(repaired!.responsibleUserId).toBe("operator-pick");
+    await expectNoMarkedRevisions(installed.id, "operator-pick");
+  });
+
+  it("defers the bundle routine when the company has no user to own it", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Ownerless",
+      issuePrefix: issuePrefix(companyId),
+      requireBoardApprovalForNewAgents: false,
+    });
+    const builtIns = builtInAgentService(db);
+
+    // Enabling still installs the agent and its skill; the routine waits for an
+    // owner instead of failing after those writes or persisting the marker.
+    const deferred = await builtIns.ensure(companyId, "reflection-coach");
+    expect(deferred.agentId).toBeTruthy();
+    expect(deferred.resources.find((resource) => resource.resourceKind === "skill")).toMatchObject({
+      stockStatus: "stock_current",
+    });
+    expect(deferred.resources.find((resource) => resource.resourceKind === "routine")).toMatchObject({
+      resourceId: null,
+      stockStatus: "missing",
+      resetAvailable: true,
+    });
+    expect(await db.select().from(routines).where(eq(routines.companyId, companyId))).toHaveLength(0);
+    const deferrals = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "built_in_agent.routine_deferred")));
+    expect(deferrals).toEqual([
+      expect.objectContaining({ entityId: deferred.agentId, details: expect.objectContaining({ reason: "no_responsible_user" }) }),
+    ]);
+
+    // The user who enables the bundle owns the routine once one is known.
+    const materialized = await builtIns.ensure(companyId, "reflection-coach", {}, { createdByUserId: "enabling-user" });
+    expect(materialized.resources.find((resource) => resource.resourceKind === "routine")).toMatchObject({
+      stockStatus: "stock_current",
+    });
+    const [routine] = await db.select().from(routines).where(eq(routines.companyId, companyId));
+    expect(routine!.responsibleUserId).toBe("enabling-user");
+    await expectNoMarkedRevisions(routine!.id, "enabling-user");
+  });
+
   it("recreates missing managed resource bindings idempotently during concurrent reconcile", async () => {
     const companyId = await seedCompany({ requireApproval: false });
     await createAgentLifecycle(db).requestHire(companyId, {

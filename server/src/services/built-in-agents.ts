@@ -499,49 +499,66 @@ const BUILT_IN_BUNDLES_ACTOR_ID = "built-in-bundles";
 
 // A bundle routine is owned by a real user like any other routine. Prefer the
 // user who enables or runs it, then the company default responsible user; the
-// synthetic bundle actor is never a candidate.
-async function requireBundleRoutineResponsibleUserId(db: Db, companyId: string, actorUserId?: string | null) {
+// synthetic bundle actor is never a candidate. Null when the company has no
+// user to own it yet.
+async function resolveBundleRoutineResponsibleUserId(db: Db, companyId: string, actorUserId?: string | null) {
   const requested = actorUserId?.trim() || null;
   const responsibleUserId = requested && requested !== BUILT_IN_BUNDLES_ACTOR_ID
     ? requested
     : await resolveCompanyDefaultResponsibleUserId(db, companyId);
-  if (!responsibleUserId || responsibleUserId === BUILT_IN_BUNDLES_ACTOR_ID) {
-    throw unprocessable("Built-in routine requires a responsible user");
-  }
+  return responsibleUserId && responsibleUserId !== BUILT_IN_BUNDLES_ACTOR_ID ? responsibleUserId : null;
+}
+
+async function requireBundleRoutineResponsibleUserId(db: Db, companyId: string, actorUserId?: string | null) {
+  const responsibleUserId = await resolveBundleRoutineResponsibleUserId(db, companyId, actorUserId);
+  if (!responsibleUserId) throw unprocessable("Built-in routine requires a responsible user");
   return responsibleUserId;
+}
+
+function hasLegacyBundleResponsibleUser(routine: { responsibleUserId?: string | null }) {
+  return routine.responsibleUserId === BUILT_IN_BUNDLES_ACTOR_ID;
 }
 
 // Rewrites a routine installed by an older release, which persisted the
 // synthetic bundle actor as its responsible user. Only rows still naming the
 // marker are touched, so operator customizations — including a responsible user
-// they picked — survive. The routine row and its revisions are written
-// together, so rewriting the marker also fixes the revision that seeds runs.
+// they picked — survive. Revisions follow the routine's owner even when the
+// routine row was already fixed, and both writes share one transaction, so the
+// revision that seeds scheduled runs can never keep the marker on its own.
 async function repairLegacyBundleRoutineResponsibleUser(
   db: Db,
   routine: { id: string; companyId: string },
-  responsibleUserId: string,
+  candidateUserId: string | null,
 ) {
-  const [repaired] = await db
-    .update(routines)
-    .set({ responsibleUserId, updatedAt: new Date() })
-    .where(and(
-      eq(routines.companyId, routine.companyId),
-      eq(routines.id, routine.id),
-      eq(routines.responsibleUserId, BUILT_IN_BUNDLES_ACTOR_ID),
-    ))
-    .returning({ id: routines.id });
-  if (!repaired) return;
-  await db
-    .update(routineRevisions)
-    .set({
-      responsibleUserId,
-      snapshot: sql`jsonb_set("snapshot", '{routine,responsibleUserId}', to_jsonb(${responsibleUserId}::text))`,
-    })
-    .where(and(
-      eq(routineRevisions.companyId, routine.companyId),
-      eq(routineRevisions.routineId, routine.id),
-      eq(routineRevisions.responsibleUserId, BUILT_IN_BUNDLES_ACTOR_ID),
-    ));
+  await db.transaction(async (tx) => {
+    if (candidateUserId) {
+      await tx
+        .update(routines)
+        .set({ responsibleUserId: candidateUserId, updatedAt: new Date() })
+        .where(and(
+          eq(routines.companyId, routine.companyId),
+          eq(routines.id, routine.id),
+          eq(routines.responsibleUserId, BUILT_IN_BUNDLES_ACTOR_ID),
+        ));
+    }
+    const [current] = await tx
+      .select({ responsibleUserId: routines.responsibleUserId })
+      .from(routines)
+      .where(and(eq(routines.companyId, routine.companyId), eq(routines.id, routine.id)));
+    const owner = current?.responsibleUserId ?? null;
+    if (!owner || owner === BUILT_IN_BUNDLES_ACTOR_ID) return;
+    await tx
+      .update(routineRevisions)
+      .set({
+        responsibleUserId: owner,
+        snapshot: sql`jsonb_set("snapshot", '{routine,responsibleUserId}', to_jsonb(${owner}::text))`,
+      })
+      .where(and(
+        eq(routineRevisions.companyId, routine.companyId),
+        eq(routineRevisions.routineId, routine.id),
+        eq(routineRevisions.responsibleUserId, BUILT_IN_BUNDLES_ACTOR_ID),
+      ));
+  });
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -1461,8 +1478,10 @@ export function builtInAgentService(db: Db) {
     if (!agent) throw notFound("Built-in agent is not provisioned");
     const current = await getRoutineByBinding(companyId, definition);
     if (!current.routine) throw notFound("Built-in routine not found");
-    const responsibleUserId = await requireBundleRoutineResponsibleUserId(db, companyId, actorUserId);
-    await repairLegacyBundleRoutineResponsibleUser(db, current.routine, responsibleUserId);
+    const candidateUserId = hasLegacyBundleResponsibleUser(current.routine)
+      ? await requireBundleRoutineResponsibleUserId(db, companyId, actorUserId)
+      : null;
+    await repairLegacyBundleRoutineResponsibleUser(db, current.routine, candidateUserId);
     const schedule = current.triggers.find((trigger) => trigger.kind === "schedule") ?? null;
     return { definition, agent, routine: current.routine, triggers: current.triggers, schedule };
   }
@@ -1479,12 +1498,13 @@ export function builtInAgentService(db: Db) {
     definition: BuiltInAgentDefinition,
     existing: Routine | null,
     mode: "reconcile" | "reset",
-    responsibleUserId: string,
+    responsibleUserId: string | null,
   ) {
     const routine = definition.bundle!.routine;
     // Automatic bundle provisioning is unattributed system work: no user id
-    // belongs in the provenance columns. The routine is still owned by a real
-    // resolved user, so runs descending from it can read their own issue.
+    // belongs in the provenance columns. A new routine is owned by the resolved
+    // user and an updated one keeps its owner, so runs descending from it can
+    // read their own issue.
     const actor = { agentId: null, userId: null, actorResponsibleUserId: responsibleUserId };
     const nextRoutine = existing
       ? await routineSvc.update(existing.id, {
@@ -1565,11 +1585,39 @@ export function builtInAgentService(db: Db) {
     const bundle = definition.bundle!;
     const stock = routineDefaultsHash(bundle.routine, bundle.routine.triggers);
     const { binding, routine, triggers } = await getRoutineByBinding(agent.companyId, definition);
-    const responsibleUserId = await requireBundleRoutineResponsibleUserId(
-      db,
-      agent.companyId,
-      responsibleUserIdHint,
-    );
+    // An owner is only needed to create the routine or to replace the legacy
+    // marker; a routine that already has a real owner keeps it through updates.
+    const responsibleUserId = !routine || hasLegacyBundleResponsibleUser(routine)
+      ? await resolveBundleRoutineResponsibleUserId(db, agent.companyId, responsibleUserIdHint)
+      : null;
+    if (!routine && !responsibleUserId) {
+      // No user can own the routine yet (a company without a default
+      // responsible user or an active owner). Leave it unmaterialized rather
+      // than persist an owner nobody can act as; the next reconcile, reset or
+      // provision with a user creates it.
+      await logActivity(db, {
+        companyId: agent.companyId,
+        actorType: "system",
+        actorId: BUILT_IN_BUNDLES_ACTOR_ID,
+        action: "built_in_agent.routine_deferred",
+        entityType: "agent",
+        entityId: agent.id,
+        details: {
+          key: definition.key,
+          routineKey: bundle.routine.routineKey,
+          reason: "no_responsible_user",
+        },
+      });
+      return withRoutineControls(stockState({
+        resourceKind: "routine",
+        resourceKey: bundle.routine.routineKey,
+        resourceId: null,
+        stockVersion: bundle.stockVersion,
+        latestStockHash: stock,
+        currentHash: null,
+        bindingStockHash: binding?.stockHash ?? null,
+      }), { routine: null, triggers: [], proposal: await pendingUpdateProposal(agent) });
+    }
     // Repair before any write so a routine left behind by an older release gets
     // a real owner even when no stock update is pending, and so a pending stock
     // update cannot re-persist the marker.
@@ -1696,6 +1744,8 @@ export function builtInAgentService(db: Db) {
     mode: "reconcile" | "reset",
     resources?: Array<"instructions" | "skill" | "routine">,
     actor?: AuthorizationActor,
+    // The user enabling the bundle, when known, owns a routine created here.
+    routineResponsibleUserId?: string | null,
   ) {
     if (!definition.bundle) return [];
     const selected = new Set(resources ?? ["instructions", "skill", "routine"]);
@@ -1712,7 +1762,7 @@ export function builtInAgentService(db: Db) {
     const refreshedAfterSkill = await agentSvc.getById(agent.id) as Agent | null;
     if (!refreshedAfterSkill) throw notFound("Built-in agent not found");
     const routine = selected.has("routine")
-      ? await materializeRoutine(refreshedAfterSkill, definition, mode, actor?.userId ?? null)
+      ? await materializeRoutine(refreshedAfterSkill, definition, mode, routineResponsibleUserId ?? actor?.userId ?? null)
       : byKind.get("routine")!;
     return [instruction, skill, routine];
   }
@@ -1887,7 +1937,14 @@ export function builtInAgentService(db: Db) {
         return state(definition, updated as Agent);
       }
       await ensureBuiltInAgentDefaultGrants(updated as Agent, definition);
-      const resources = await reconcileBundleResources(updated as Agent, definition, "reconcile");
+      const resources = await reconcileBundleResources(
+        updated as Agent,
+        definition,
+        "reconcile",
+        undefined,
+        undefined,
+        options.createdByUserId ?? null,
+      );
       return state(definition, await agentSvc.getById(existing.id) as Agent, resources);
     }
 
@@ -1941,7 +1998,14 @@ export function builtInAgentService(db: Db) {
     });
 
     await ensureBuiltInAgentDefaultGrants(created, definition);
-    const resources = await reconcileBundleResources(created, definition, "reconcile");
+    const resources = await reconcileBundleResources(
+      created,
+      definition,
+      "reconcile",
+      undefined,
+      undefined,
+      options.createdByUserId ?? null,
+    );
     return state(definition, await agentSvc.getById(created.id) as Agent, resources);
   }
 
