@@ -489,7 +489,6 @@ describeEmbeddedPostgres("issue blocker attention", () => {
 
     const blocked = await svc.list(companyId, { status: "blocked" });
     const parent = blocked.find((issue) => issue.id === parentId);
-    const leaf = blocked.find((issue) => issue.id === reviewLeafId);
 
     expect(parent?.blockerAttention).toMatchObject({
       state: "covered",
@@ -500,7 +499,11 @@ describeEmbeddedPostgres("issue blocker attention", () => {
       attentionBlockerCount: 0,
       sampleStalledBlockerIdentifier: null,
     });
+
     // The two classifiers must agree on the same blocker.
+    const leaf = (await svc.list(companyId, { status: "in_review" })).find(
+      (issue) => issue.id === reviewLeafId,
+    );
     expect(leaf?.reviewAttention?.state).toBe("covered");
   });
 
