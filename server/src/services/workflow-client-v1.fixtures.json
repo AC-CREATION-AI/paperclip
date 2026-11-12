@@ -1,0 +1,50 @@
+[
+  {
+    "name": "open",
+    "envelope": {
+      "version": 1,
+      "requestId": "fixture-open",
+      "operation": "open",
+      "connectionId": "connection-test",
+      "route": "/rea",
+      "handle": null
+    },
+    "canonical": "{\"connectionId\":\"connection-test\",\"handle\":null,\"operation\":\"open\",\"requestId\":\"fixture-open\",\"route\":\"/rea\",\"version\":1}",
+    "payloadHash": "-p5JYjb_g3u4keCDQ9mD-wvK8yNy-dhbKsPAI3iymEs"
+  },
+  {
+    "name": "call",
+    "envelope": {
+      "version": 1,
+      "requestId": "fixture-call",
+      "operation": "call",
+      "connectionId": "connection-test",
+      "route": "/rea",
+      "handle": "opaque-test-handle",
+      "tool": "read",
+      "arguments": {
+        "é": "test",
+        "a": [
+          true,
+          null,
+          1
+        ]
+      }
+    },
+    "canonical": "{\"arguments\":{\"a\":[true,null,1],\"é\":\"test\"},\"connectionId\":\"connection-test\",\"handle\":\"opaque-test-handle\",\"operation\":\"call\",\"requestId\":\"fixture-call\",\"route\":\"/rea\",\"tool\":\"read\",\"version\":1}",
+    "payloadHash": "EGRfetf6uw-Fuyzd0bcN2Gha23NhFxCMeZXj_PZ6JzQ"
+  },
+  {
+    "name": "close",
+    "envelope": {
+      "version": 1,
+      "requestId": "fixture-close",
+      "operation": "close",
+      "connectionId": "connection-test",
+      "route": "/rea",
+      "handle": "opaque-test-handle"
+    },
+    "canonical": "{\"connectionId\":\"connection-test\",\"handle\":\"opaque-test-handle\",\"operation\":\"close\",\"requestId\":\"fixture-close\",\"route\":\"/rea\",\"version\":1}",
+    "payloadHash": "HC2N_9jtYX_EXFN4j0QtKl-yDiEdgJoBulQE9KTMjSg"
+  }
+]

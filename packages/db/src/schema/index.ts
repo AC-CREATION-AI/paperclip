@@ -1,5 +1,6 @@
 export { chatSlackRegistrations } from "./chat_slack_registrations.js";
 export { companies } from "./companies.js";
+export { workflowCallBindings } from "./workflow_call_bindings.js";
 export { companyLogos } from "./company_logos.js";
 export { companyTransferRuns } from "./company_transfer_runs.js";
 export { companyOnboardingSeeds } from "./company_onboarding_seeds.js";

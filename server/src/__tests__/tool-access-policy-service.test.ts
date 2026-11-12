@@ -1144,6 +1144,40 @@ describeEmbeddedPostgres("tool access policy service", () => {
     expect(saved.policyExplanation?.consumedRateAdmissions).toEqual(expect.arrayContaining(oldAdmissions as unknown[]));
   });
 
+  it("reuses workflow call receipts without charging the same invocation twice", async () => {
+    const { company, input, invocation, svc } = await admittedRateLimitedInvocation();
+    const added = await svc.createPolicy(company.id, { name: "Workflow admission", policyType: "rate_limit", priority: 0,
+      selectors: { toolName: "send_email" }, config: { limit: 1, windowSeconds: 3600, keyBy: ["agent", "tool"] } });
+    const results = await Promise.all(Array.from({ length: 4 }, () => svc.admitWorkflowCall(input, invocation.id)));
+    expect(results.every(result => result.allowed)).toBe(true);
+    expect(await db.select().from(toolRateLimitCounters).where(eq(toolRateLimitCounters.policyId, added.id)))
+      .toMatchObject([{ limit: 1, remaining: 0 }]);
+    expect(await svc.admitWorkflowCall({ ...input, request: { ...input.request, arguments: { to: "other@example.test" } } }, invocation.id))
+      .toMatchObject({ decision: "deny", allowed: false });
+  });
+
+  it("reevaluates workflow policy after a successful admission", async () => {
+    const { company, input, invocation, svc } = await admittedRateLimitedInvocation();
+    expect(await svc.admitWorkflowCall(input, invocation.id)).toMatchObject({ allowed: true });
+    await svc.createPolicy(company.id, { name: "Workflow revoked", policyType: "block", priority: 0,
+      selectors: { toolName: "send_email" } });
+    expect(await svc.admitWorkflowCall(input, invocation.id)).toMatchObject({ decision: "deny", allowed: false });
+  });
+
+  it("rolls back workflow charges when fresh policy requires approval", async () => {
+    const { company, input, invocation, svc } = await admittedRateLimitedInvocation();
+    await svc.createPolicy(company.id, { name: "Before workflow approval", policyType: "rate_limit", priority: 0,
+      selectors: { toolName: "send_email" }, config: { limit: 1, windowSeconds: 3600, keyBy: ["agent", "tool"] } });
+    await svc.createPolicy(company.id, { name: "Fresh workflow approval", policyType: "require_approval", priority: 10,
+      selectors: { toolName: "send_email" } });
+    const counters = await db.select().from(toolRateLimitCounters);
+    expect(await svc.admitWorkflowCall(input, invocation.id)).toMatchObject({ decision: "require_approval", allowed: false });
+    expect(await db.select().from(toolRateLimitCounters)).toEqual(counters);
+    const [saved] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, invocation.id));
+    expect(saved.policyExplanation).toEqual(invocation.policyExplanation);
+    expect(saved.status).toBe("executing");
+  });
+
   it("allows only one of two admitted invocations to spend a newly added final slot", async () => {
     const { company, input, invocation, svc } = await admittedRateLimitedInvocation(2);
     const initial = await svc.decide({ ...input, consumeRateLimit: true });

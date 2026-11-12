@@ -1488,6 +1488,29 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
   }
 
   /**
+   * Unwired policy-only building block for workflow call introspection.
+   * The caller must authenticate the service and principal, bind the verified
+   * envelope to this exact invocation/input, and recheck gateway/run/approval
+   * authority. This does not admit open/close, claim an approval, dispatch an
+   * upstream tool, or provide replay protection / exactly-once execution.
+   *
+   * Reuse durable rate receipts under the existing invocation/claim locks, but
+   * unlike the interactive admission path, never commit new charges while
+   * waiting for approval. No decision cache or positive authorization is reused.
+   */
+  async function admitWorkflowCall(
+    input: ToolAccessDecisionInput,
+    invocationId: string,
+    claim?: ToolApprovalClaim,
+  ): Promise<ToolAccessDecision> {
+    return admitInvocation(input, invocationId, claim, async (policy, admissionInput) => {
+      const result = await policy.decide(admissionInput, { admittedInvocationId: invocationId });
+      if (!result.allowed) throw new RejectedInvocationAdmission(result);
+      return result;
+    });
+  }
+
+  /**
    * Decides one tool access request. Pass the same `cache` to every call of a
    * batch that shares one actor and run context (for example, one tools/list
    * response) so the batch reads the shared policy inputs once.
@@ -2263,6 +2286,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
   return {
     decide,
     admitInvocation,
+    admitWorkflowCall,
     writeAudit,
     recordInvocation,
     summarizeAndRedact,
