@@ -1127,11 +1127,65 @@ function startsInsideJsonString(line: string) {
 const MAX_NESTED_CHUNK_DEPTH = 3;
 const ESCAPED_JSON_STRING_LITERAL_RE = /"((?:[^"\\\n]|\\.)*)"/g;
 
-/** Redact the decoded text of JSON string literals that carry escapes (pretty-printed JSON, quoted dumps). */
+/**
+ * Whether the quote at `index` opens a JSON value: it follows a structural
+ * character, whitespace aside. A stray quote in prose does not.
+ */
+function opensJsonValue(text: string, index: number): boolean {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const character = text[cursor]!;
+    if (/\s/.test(character)) continue;
+    return /[{[,:]/.test(character);
+  }
+  return false;
+}
+
+/** Whether the quote at `index` is escaped by the backslashes before it. */
+function isEscapedQuote(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) backslashes += 1;
+  return backslashes % 2 === 1;
+}
+
+/**
+ * A JSON string literal cut by the runtime has no closing quote: the rest of
+ * the text is its body. The ACP runtime truncates every tool summary at 500
+ * characters (`TOOL_OUTPUT_SUMMARY_MAX_CHARS` in acpx/dist/runtime.js, both
+ * pinned versions), so a hub MCP tool output stored through `run_tool` ends
+ * on a cut literal as soon as it exceeds ~477 characters. Such a literal is
+ * not matched by `ESCAPED_JSON_STRING_LITERAL_RE`, so the nested passes never
+ * reached the material it carried and the secret stayed in clear.
+ *
+ * The cut literal is the last unescaped quote of the text: every quote before
+ * it is closed, so it has no partner left. Two signals keep prose out of it:
+ * the body must carry escapes, and the quote must open a JSON value. A stray
+ * quote in a log line is left alone.
+ */
+function truncatedJsonStringLiteral(text: string): { start: number; body: string } | null {
+  for (let quote = text.lastIndexOf("\""); quote !== -1; quote = text.lastIndexOf("\"", quote - 1)) {
+    if (isEscapedQuote(text, quote)) continue;
+    const body = text.slice(quote + 1);
+    if (!body.includes("\\") || !opensJsonValue(text, quote)) return null;
+    return { start: quote, body };
+  }
+  return null;
+}
+
+/**
+ * Redact the decoded text of JSON string literals that carry escapes
+ * (pretty-printed JSON, quoted dumps). A literal the runtime cut keeps its
+ * escapes decoded, so the material it carries is masked as well. The cut
+ * literal keeps its original shape: no closing quote is added, so a record
+ * the redaction leaves unchanged keeps its bytes.
+ */
 function redactEscapedJsonStringLiterals(text: string, redact: (text: string) => string): string {
   if (!text.includes("\\")) return text;
-  return text.replace(ESCAPED_JSON_STRING_LITERAL_RE, (match, body: string) =>
+  const cut = truncatedJsonStringLiteral(text);
+  const head = cut ? text.slice(0, cut.start) : text;
+  const redacted = head.replace(ESCAPED_JSON_STRING_LITERAL_RE, (match, body: string) =>
     body.includes("\\") ? `"${redactJsonStringBody(body, redact)}"` : match);
+  if (!cut) return redacted;
+  return `${redacted}${redactJsonStringBody(cut.body, redact)}`;
 }
 
 function redactRunLogContentAt(

@@ -544,7 +544,13 @@ secret value to surface after resolution. Two server-side controls apply to
   second time; a hub MCP tool called through `run_tool` wraps that output in
   the gateway envelope (`{"content":[{"type":"text","text":...}]}`); and the
   output may print JSON of its own (an escaped string value of pretty-printed
-  JSON is decoded as well).
+  JSON is decoded as well). A literal the runtime cut is decoded too: the ACP
+  runtime truncates every tool summary at 500 characters
+  (`TOOL_OUTPUT_SUMMARY_MAX_CHARS`), so a hub MCP tool output stored through
+  `run_tool` ends on a string literal with no closing quote as soon as it
+  exceeds ~477 characters. Such a cut literal is treated as a complete one,
+  so the material it carries is masked on write and on read. A quote in prose
+  that does not open a JSON value is left alone.
 - **Redaction at write time.** Chunks are stored after the generic
   sensitive-text pass and the same family patterns, applied to the raw chunk
   and again to its decoded nested JSON, so a PEM block or a family token in

@@ -405,3 +405,85 @@ describe("run log secret redaction on hub MCP tool output (ACC-3241, run_tool en
     expect(compactRunLogChunk(event)).toBe(event);
   });
 });
+
+// The ACP runtime truncates every tool summary at 500 characters
+// (acpx/dist/runtime.js, `TOOL_OUTPUT_SUMMARY_MAX_CHARS`), in both pinned
+// versions (0.12.0 for packages/adapter-utils, 0.13.1 for the server):
+//
+//   function truncateToolSummary(value) {
+//     if (value.length <= TOOL_OUTPUT_SUMMARY_MAX_CHARS) return value;
+//     return `${value.slice(0, TOOL_OUTPUT_SUMMARY_MAX_CHARS - 1)}…`;
+//   }
+//
+// A hub MCP tool reached through `run_tool` therefore stores a CUT gateway
+// envelope as soon as its output exceeds ~477 characters: the cut falls
+// inside a JSON string literal, which no longer has a closing quote. The
+// nested passes walked JSON string literals, so they stopped there and the
+// secret stayed in clear — on write and on read.
+const ACPX_TOOL_OUTPUT_SUMMARY_MAX_CHARS = 500;
+
+function truncateToolSummary(value: string) {
+  if (value.length <= ACPX_TOOL_OUTPUT_SUMMARY_MAX_CHARS) return value;
+  return `${value.slice(0, ACPX_TOOL_OUTPUT_SUMMARY_MAX_CHARS - 1)}…`;
+}
+
+function acpxRunToolResultTruncated(output: string) {
+  return acpxToolCall(`tool call (completed): ${truncateToolSummary(JSON.stringify({
+    content: [{ type: "text", text: output }],
+    structuredContent: null,
+    isError: false,
+    transport: "mcp_http",
+    spawnedLocalProcess: false,
+  }))}`);
+}
+
+describe("run log secret redaction on a truncated ACP tool summary (ACC-3241)", () => {
+  const body = Array.from({ length: 6 }, (_, index) =>
+    (`b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW`
+      + `QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo`.slice(index % 8)).repeat(2).slice(0, 70));
+  const pem = `-----BEGIN OPENSSH PRIVATE KEY-----\n${body.join("\n")}\n-----END OPENSSH PRIVATE KEY-----\n`;
+  const pretty = JSON.stringify({ name: "deploy key", sshKey: { privateKey: pem } }, null, 2);
+
+  it("collapses an unknown PEM when the tool summary was cut by the runtime", async () => {
+    const { registry, run } = fixture({});
+    const out = await registry.redactRunLog("company-1", run, { content: ndjson(acpxRunToolResultTruncated(pretty)) });
+    for (const line of body) expect(out.content).not.toContain(line);
+  });
+
+  it("masks the same cut output at write time", () => {
+    const stored = compactRunLogChunk(acpxRunToolResultTruncated(pretty));
+    for (const line of body) expect(stored).not.toContain(line);
+  });
+
+  it("masks a fingerprinted company secret in a cut tool summary", async () => {
+    const leaked = "7f3ab19c-4e5d-6a7b-8c9d-0e1f2a3b4c5d";
+    const { registry, run } = fixture({ versionRows: [{ fingerprintSha256: sha256(leaked) }] });
+    const out = await registry.redactRunLog("company-1", run, {
+      content: ndjson(acpxRunToolResultTruncated(JSON.stringify({ db: { password: leaked }, note: "x".repeat(400) }, null, 2))),
+    });
+    expect(out.content).not.toContain(leaked);
+  });
+
+  it("masks a bound PEM in a cut tool summary", async () => {
+    resolveBoundValues.mockResolvedValueOnce([pem]);
+    const { registry, run } = fixture({});
+    const out = await registry.redactRunLog("company-1", run, { content: ndjson(acpxRunToolResultTruncated(pretty)) });
+    for (const line of body) expect(out.content).not.toContain(line);
+  });
+});
+
+describe("run log secret redaction on a cut literal outside JSON (ACC-3241)", () => {
+  it("leaves prose carrying a stray quote byte-identical", async () => {
+    const { registry, run } = fixture({});
+    const content = ndjson(`he said "hello\\n and left\n`);
+    const out = await registry.redactRunLog("company-1", run, { content });
+    expect(out.content).toBe(content);
+  });
+
+  it("leaves a cut literal that does not open a JSON value byte-identical", async () => {
+    const { registry, run } = fixture({});
+    const content = ndjson(`prefix "unterminated \\n value\n`);
+    const out = await registry.redactRunLog("company-1", run, { content });
+    expect(out.content).toBe(content);
+  });
+});
