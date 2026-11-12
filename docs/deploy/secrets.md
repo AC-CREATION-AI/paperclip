@@ -549,7 +549,8 @@ secret value to surface after resolution. Two server-side controls apply to
   (`TOOL_OUTPUT_SUMMARY_MAX_CHARS`), so a hub MCP tool output stored through
   `run_tool` ends on a string literal with no closing quote as soon as it
   exceeds ~477 characters. Such a cut literal is treated as a complete one,
-  so the material it carries is masked on write and on read. A quote in prose
+  so the material it carries is masked on write and on read (two residuals of
+  the cut itself remain open, see *Open defects* below). A quote in prose
   that does not open a JSON value is left alone.
 - **Redaction at write time.** Chunks are stored after the generic
   sensitive-text pass and the same family patterns, applied to the raw chunk
@@ -563,6 +564,25 @@ secret value to surface after resolution. Two server-side controls apply to
   masked only when its value is bound to the run or its agent. The
   values of a deleted secret are no longer masked: deletion removes its
   stored versions and their fingerprints.
+- **Open defects (truncation residuals).** Two residuals of the 500-character
+  cut itself are known and **not fixed**. They are open defects, not closed
+  limitations:
+  - **T2 (medium): a secret that straddles the cut keeps a clear prefix.**
+    When the cut lands inside a secret, only a prefix of it survives in the
+    stored summary (10 to 30 characters measured), and a PEM body cut before
+    its block footer stays readable line by line (6 of 6 lines measured). No
+    masking pass can remove what the runtime never wrote. The durable fix is
+    to log the full tool output (or at least its fingerprint) instead of the
+    truncated summary; until then, treat any tool output past ~477
+    characters as potentially carrying a clear secret prefix.
+  - **T1 (low): the cut-literal path can consume the opening quote of prose
+    that is not JSON.** When a quote follows a structural character and the
+    text contains an escape (for example `key: "value with \"escape`), the
+    line is treated as a cut literal even though it is prose, and its opening
+    quote is dropped. The visible text is otherwise preserved byte for byte,
+    the served record stays valid JSON, and redaction is idempotent. Common
+    forms (Windows paths, URLs, sentences with a closing quote) are not
+    affected.
 - **Access control.** The log route answers only to the run's own agent
   identity and to board principals (operators, instance admins). Any other
   agent of the company receives `403`. A run the caller cannot see at all
