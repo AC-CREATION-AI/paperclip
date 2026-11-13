@@ -6,6 +6,7 @@ import {
   connectionGrants,
   createDb,
   toolCatalogEntries,
+  toolActionRequests,
   toolConnectionInstalls,
   toolConnections,
   toolInvocations,
@@ -240,6 +241,66 @@ if (!support.supported) console.warn(`Skipping ACC-4308 GitHub broker integratio
     expect(await toolAccessPolicyService(db).decide(decisionInput(input, selected, pairs[0]))).toMatchObject({ allowed: true, reasonCode: "allow_policy" });
     await expect(mutation(input, selected, pairs[0])).rejects.toMatchObject({ status: 403, message: expect.stringContaining("no resolved managed identity") });
     expectNoVaultRead();
+  });
+
+  async function gatewayFixture() {
+    const input = await seed();
+    const selected = await grant(input, "robot", true);
+    await bound(input, selected);
+    await broadProfile(input);
+    const [connection] = await db.update(toolConnections).set({
+      healthStatus: "ok", config: { sourceTemplateKey: "github", url: "https://8.8.8.8/mcp" },
+    }).where(eq(toolConnections.id, selected.connectionId)).returning();
+    await db.insert(toolCatalogEntries).values({
+      companyId: input.companyId, applicationId: connection.applicationId, connectionId: connection.id,
+      entryKind: "tool", name: "create_branch", toolName: "create_branch", status: "active",
+      riskLevel: "write", isReadOnly: false, isWrite: true, versionHash: "broker-integration-v1",
+      inputSchema: { type: "object", properties: { owner: { type: "string" }, repo: { type: "string" } } },
+    });
+    const calls: unknown[] = [];
+    const remoteHttpRequest = vi.fn(async (_url: string, init: RequestInit): Promise<Response> => {
+      const payload = JSON.parse(String(init.body));
+      if (payload.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (payload.method === "initialize") return Response.json({ jsonrpc: "2.0", id: payload.id,
+        result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } } });
+      expect(payload.method).toBe("tools/call");
+      calls.push(payload.params.arguments);
+      return Response.json({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: "fixture branch created" }] } });
+    });
+    const gateway = createToolGatewayService(db, { remoteHttpRequest, toolActionSigningSecret: "github-broker-integration-test-only" });
+    const session = await gateway.createSession(input);
+    const tool = (await gateway.listToolsForSession(session.token))
+      .find(candidate => candidate.connectionId === selected.connectionId && candidate.upstreamToolName === "create_branch");
+    expect(tool).toBeDefined();
+    return { input, selected, gateway, session, tool: tool!, calls };
+  }
+
+  it("dispatches an exact pair through the real gateway to a synthetic MCP provider", async () => {
+    const f = await gatewayFixture();
+    const result = await f.gateway.executeTool({ sessionToken: f.session.token, tool: f.tool.name,
+      parameters: pairs[0], idempotencyKey: randomUUID() });
+    expect(result.status).toBe("completed");
+    expect(f.calls).toEqual([pairs[0]]);
+  });
+
+  it("rechecks signed approved arguments and refuses profile-only authority before provider dispatch", async () => {
+    const f = await gatewayFixture();
+    const [review] = await db.insert(toolPolicies).values({ companyId: f.input.companyId,
+      name: "Review bounded branch", policyType: "require_approval", priority: 0,
+      selectors: { agentId: f.input.agentId, connectionId: f.selected.connectionId, toolName: "create_branch" },
+    }).returning();
+    await expect(f.gateway.executeTool({ sessionToken: f.session.token, tool: f.tool.name,
+      parameters: pairs[0], idempotencyKey: randomUUID() })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [action] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, f.input.companyId));
+    await f.gateway.approveActionRequest({ companyId: f.input.companyId, actionRequestId: action.id, actor: { userId: "A" } });
+    await db.update(toolPolicies).set({ enabled: false }).where(eq(toolPolicies.id, review.id));
+    for (const policy of await db.select().from(toolPolicies).where(eq(toolPolicies.companyId, f.input.companyId))) {
+      if (policy.policyType === "allow") await db.update(toolPolicies)
+        .set({ conditions: { arguments: { fieldEquals: pairs[1] } } }).where(eq(toolPolicies.id, policy.id));
+    }
+    await expect(f.gateway.executeTool({ sessionToken: f.session.token, tool: f.tool.name,
+      approvedActionRequestId: action.id, parameters: pairs[1] })).rejects.toMatchObject({ status: 403 });
+    expect(f.calls).toEqual([]);
   });
 
   it("blocks an otherwise profile-allowed call at the actual gateway dispatch before provider I/O", async () => {
