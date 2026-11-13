@@ -2166,18 +2166,20 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     );
   });
 
-  it("schedules an omniroute_transient_upstream retry after the reset announced in its 429 (ACC-4351)", async () => {
+  it("schedules a retry after the reset announced in the 429 of a classified gateway failure (ACC-4351)", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const runId = randomUUID();
     const now = new Date("2026-11-12T18:24:00.000Z");
-    // Shape of an omniroute_native failure: no errorFamily, no retryNotBefore, only the code and the message.
+    // Shape read on the 12/11 runs of the OmniRoute plugin adapter: the
+    // adapter writes the family, the server reads the window from the message.
     await seedRetryFixture({
       runId,
       companyId,
       agentId,
       now,
       errorCode: "omniroute_transient_upstream",
+      errorFamily: "transient_upstream",
       adapterType: "claude_local",
       error: "OmniRoute /v1/chat/completions a répondu 429 : Service temporarily unavailable: all targets were " +
         "skipped by pre-dispatch filters (weekly (7d) 99% conn:91646fcc; claude-sonnet-5-5-low 100% conn:b87ad428) " +
@@ -2201,7 +2203,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect(contextSnapshot.transientRetryNotBefore).toBe(retryNotBefore.toISOString());
   });
 
-  it("schedules a bounded retry for omniroute_provider_quota as a provider quota", async () => {
+  it("schedules a bounded retry for a classified provider quota failure", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const runId = randomUUID();
@@ -2212,6 +2214,7 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       agentId,
       now,
       errorCode: "omniroute_provider_quota",
+      errorFamily: "provider_quota",
       adapterType: "claude_local",
       error: "OmniRoute /v1/chat/completions a répondu 429 : [429]: quota exhausted",
     });
@@ -2226,6 +2229,30 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       .where(eq(heartbeatRuns.id, scheduled.run.id))
       .then((rows) => rows[0] ?? null);
     expect((retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily).toBe("provider_quota");
+  });
+
+  it("does not schedule a retry for an unclassified gateway failure", async () => {
+    // The server no longer guesses a family from an adapter-specific code: an
+    // unclassified failure gets no automatic retry, even when its message
+    // carries a window.
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date("2026-11-12T18:24:00.000Z");
+    await seedRetryFixture({
+      runId,
+      companyId,
+      agentId,
+      now,
+      errorCode: "omniroute_transient_upstream",
+      adapterType: "claude_local",
+      error: "OmniRoute /v1/chat/completions a répondu 429 : all targets were skipped by pre-dispatch filters " +
+        "reset after 9m 47s",
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, { now, random: () => 0.5 });
+
+    expect(scheduled.outcome).not.toBe("scheduled");
   });
 
   describe("run-dispatch module transactions", () => {
