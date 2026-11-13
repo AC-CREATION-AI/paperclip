@@ -17,6 +17,7 @@ import {
   accountingForScheduledRetry,
 } from "../execution-recovery-attempt.js";
 import { WORKSPACE_GIT_SCAN_ERROR_CODES } from "../workspace-git-operation-scheduler.js";
+import { readGatewayRateLimitWindow } from "@paperclipai/adapter-utils/gateway-rate-limit-window";
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE } from "../legacy-controller-lease.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -245,16 +246,12 @@ export function readHeartbeatRunErrorFamily(
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
   if (persistedFamily) return persistedFamily;
 
-  if (
-    run.errorCode === "provider_quota" ||
-    run.errorCode === "omniroute_provider_quota"
-  ) {
+  if (run.errorCode === "provider_quota") {
     return "provider_quota";
   }
   if (
     run.errorCode === "codex_transient_upstream" ||
     run.errorCode === "claude_transient_upstream" ||
-    run.errorCode === "omniroute_transient_upstream" ||
     run.errorCode === "codex_harness_crash"
   ) {
     return "transient_upstream";
@@ -262,24 +259,18 @@ export function readHeartbeatRunErrorFamily(
   return null;
 }
 
-// OmniRoute reports its pre-dispatch quota window as a countdown in the error
-// text ("... reset after 4m 28s", "reset after 1h 26m 15s", "reset after 10m").
-const RELATIVE_RESET_AFTER_RE =
-  /(?:\b429\b|rate[-\s]?limit|quota|pre-dispatch\s+filters|temporarily\s+unavailable)[^\n]{0,600}?\bresets?\s+(?:after|in)\s+(?:(\d+)\s*h(?![a-z])\s*)?(?:(\d+)\s*m(?![a-z])\s*)?(?:(\d+)\s*s(?![a-z]))?/i;
-// The countdown is rounded down to the second and measured on the gateway's
-// clock: never retry on the boundary itself.
-export const RELATIVE_RESET_AFTER_MARGIN_MS = 30_000;
-
+/**
+ * Read the gateway rate-limit window a provider announced in its error text
+ * ("... reset after 4m 28s", "reset after 1h 26m 15s").
+ *
+ * The countdown and the limit signal must sit on the same line: a countdown
+ * quoted on another line belongs to a different subject and is ignored.
+ */
 export function parseRelativeResetAfter(
   text: string | null | undefined,
   reference: Date,
 ): Date | null {
-  const match = typeof text === "string" ? RELATIVE_RESET_AFTER_RE.exec(text) : null;
-  if (!match || (!match[1] && !match[2] && !match[3])) return null;
-  const seconds =
-    Number(match[1] ?? 0) * 3600 + Number(match[2] ?? 0) * 60 + Number(match[3] ?? 0);
-  if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  return new Date(reference.getTime() + seconds * 1000 + RELATIVE_RESET_AFTER_MARGIN_MS);
+  return readGatewayRateLimitWindow(text, reference);
 }
 
 function readTransientRetryNotBeforeFromRun(
@@ -293,8 +284,8 @@ function readTransientRetryNotBeforeFromRun(
     typeof value === "number" ||
     value instanceof Date
   )) {
-    // Adapters that only carry the reset in their message (omniroute_native)
-    // still get a retry after the window, counted from the failure itself.
+    // An adapter that carries the window only in its message still gets a
+    // retry after that window, counted from the failure itself.
     return run.finishedAt ? parseRelativeResetAfter(run.error, run.finishedAt) : null;
   }
   const parsed = new Date(value);
