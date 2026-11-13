@@ -14,9 +14,16 @@
  *   push the retry an hour out.
  */
 
-/** Words that mark a rate-limit window on the line that carries it. */
+/**
+ * Words that mark a limit window on the line that carries it.
+ *
+ * The signal only establishes that the line talks about a limit; the
+ * countdown that follows it on the same line gives the window. The caller
+ * has already classified the failure as a rate window: this only locates the
+ * countdown.
+ */
 const LIMIT_SIGNAL_RE =
-  /(?:\b429\b|rate[-\s]?limit|pre-dispatch\s+filters|temporarily\s+unavailable|quota\s+exhausted)/i;
+  /(?:\b429\b|rate[-\s]?limit|pre-dispatch\s+filters|temporarily\s+unavailable|quota)/i;
 
 /** The countdown itself: "reset after 4m 28s", "resets in 1h 26m 15s". */
 const RELATIVE_RESET_RE =
@@ -69,15 +76,4 @@ export function readGatewayRateLimitWindow(
     return new Date(now.getTime() + seconds * 1000 + GATEWAY_RESET_MARGIN_MS);
   }
   return null;
-}
-
-/**
- * True when the text carries a gateway rate-limit signal at all.
- *
- * Generic "rate limit" wording stays out of the *quota* reading: a typed
- * provider `limit` also covers context, turn and budget limits, which must
- * not be read as a rate window.
- */
-export function isGatewayRateLimitText(text: string | null | undefined): boolean {
-  return typeof text === "string" && LIMIT_SIGNAL_RE.test(text);
 }

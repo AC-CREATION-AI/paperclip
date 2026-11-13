@@ -126,10 +126,12 @@ describe("transient recovery contract (ACC-4351)", () => {
   });
 
   it("ignores a countdown that sits on another line than the limit signal", () => {
-    // The countdown belongs to another subject: it must not push the retry.
+    // The limit signal is on the first line; the countdown sits on the second
+    // line, which carries no limit signal of its own. It belongs to another
+    // subject: it must not push the retry.
     const error = [
       "Request rejected (429) · Service temporarily unavailable",
-      "all targets were skipped by pre-dispatch filters reset after 9m 47s",
+      "the window closes reset after 9m 47s",
     ].join("\n");
     expect(extracted.parseRelativeResetAfter(error, finishedAt)).toBeNull();
   });

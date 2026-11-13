@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   GATEWAY_RESET_MARGIN_MS,
-  isGatewayRateLimitText,
   readGatewayRateLimitWindow,
   readGatewayRateLimitWindowSeconds,
 } from "./gateway-rate-limit-window.js";
@@ -51,10 +50,12 @@ describe("readGatewayRateLimitWindow", () => {
   });
 
   it("requires the countdown to sit on the same line as the limit signal", () => {
-    // The limit signal is on the first line, the countdown on the second.
+    // The limit signal is on the first line; the countdown sits on the second
+    // line, which carries no limit signal of its own. The countdown belongs
+    // to another subject and must not delay the retry.
     const text = [
       "Request rejected (429) · Service temporarily unavailable",
-      "all targets were skipped by pre-dispatch filters reset after 9m 47s",
+      "the window closes reset after 9m 47s",
     ].join("\n");
     expect(readGatewayRateLimitWindow(text, now)).toBeNull();
   });
@@ -73,21 +74,5 @@ describe("readGatewayRateLimitWindow", () => {
     expect(readGatewayRateLimitWindow(null, now)).toBeNull();
     expect(readGatewayRateLimitWindow("", now)).toBeNull();
     expect(readGatewayRateLimitWindow("Overloaded. Try again later.", now)).toBeNull();
-  });
-});
-
-describe("isGatewayRateLimitText", () => {
-  it("recognizes the OmniRoute pre-dispatch 429", () => {
-    expect(
-      isGatewayRateLimitText(
-        "Request rejected (429) · all targets were skipped by pre-dispatch filters reset after 4m 28s",
-      ),
-    ).toBe(true);
-  });
-
-  it("leaves generic wording out", () => {
-    expect(isGatewayRateLimitText("Rate limit exceeded; retry later")).toBe(false);
-    expect(isGatewayRateLimitText("Context window limit exceeded")).toBe(false);
-    expect(isGatewayRateLimitText(null)).toBe(false);
   });
 });

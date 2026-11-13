@@ -512,13 +512,14 @@ describe("extractClaudeRetryNotBefore", () => {
   });
 
   it("ignores a countdown that sits on another line than the limit signal", () => {
-    // The limit signal is on the first line, the countdown on the second: the
-    // countdown belongs to another subject and must not delay the retry.
+    // The limit signal is on the first line; the countdown sits on the second
+    // line, which carries no limit signal of its own. The countdown belongs
+    // to another subject and must not delay the retry.
     const now = new Date("2026-11-12T17:42:30.000Z");
     const errorMessage = [
       "ACP agent reported a terminal limit failure.",
       "API Error: Request rejected (429) · Service temporarily unavailable",
-      "all targets were skipped by pre-dispatch filters reset after 4m 28s",
+      "the window closes reset after 4m 28s",
     ].join("\n");
     expect(extractClaudeRetryNotBefore({ errorMessage }, now)).toBeNull();
   });
