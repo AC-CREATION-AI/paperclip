@@ -1563,7 +1563,8 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     }
     const matchingPolicies = policies
       .map((policy) => ({ policy, conditionEvaluation: evaluatePolicyConditions(policyConditions(policy), ctx) }))
-      .filter(({ policy, conditionEvaluation }) => selectorMatches(policy.selectors, ctx) && conditionEvaluation.matched);
+      .filter(({ policy, conditionEvaluation }) => selectorMatches(policy.selectors, ctx) && conditionEvaluation.matched)
+      .sort((a, b) => Number(b.policy.policyType === "block") - Number(a.policy.policyType === "block"));
     const explicitBlock = matchingPolicies.find(({ policy }) => policy.policyType === "block");
     for (const { policy, conditionEvaluation } of matchingPolicies) {
       const policyExplanation = {

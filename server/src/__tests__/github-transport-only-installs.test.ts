@@ -282,6 +282,37 @@ describeDatabase("GitHub transport-only connection installs", () => {
     }
   });
 
+  it("rolls back a terminated database session before reach insert and reconciles on retry", async () => {
+    const f = await fixture({});
+    await f.seed();
+    const added: Install = { targetType: "agent", targetId: f.agentIds[7], bindAppProfile: false };
+    await db.insert(toolProfileBindings).values({
+      companyId: f.companyId, profileId: f.appProfile.id, targetType: "agent", targetId: added.targetId,
+      metadata: { source: "manual" },
+    });
+    const priorBindings = await f.bindings();
+    const priorInstalls = await f.service.listConnectionInstalls(f.connection.id);
+    const functionName = `transport_only_disconnect_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      PERFORM pg_terminate_backend(pg_backend_pid());
+      RETURN NEW;
+    END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER ${functionName} BEFORE INSERT ON tool_connection_installs
+      FOR EACH ROW WHEN (NEW.connection_id = '${f.connection.id}') EXECUTE FUNCTION ${functionName}()`));
+    try {
+      await expect(f.service.putConnectionInstalls(f.connection.id, { installs: [...f.targets, added] })).rejects.toBeDefined();
+      expect(await f.bindings()).toEqual(priorBindings);
+      expect(await f.service.listConnectionInstalls(f.connection.id)).toEqual(priorInstalls);
+    } finally {
+      await db.execute(sql.raw(`DROP TRIGGER ${functionName} ON tool_connection_installs`));
+      await db.execute(sql.raw(`DROP FUNCTION ${functionName}()`));
+    }
+    await f.put([...f.targets, added]);
+    await f.put([...f.targets, added]);
+    expect(await f.bindings()).toEqual(priorBindings.filter(binding => binding.targetId !== added.targetId));
+    expect((await f.effective(added.targetId)).allowedTools).toEqual([]);
+  });
+
   it("rolls back binding deletion, reach and audit when install insertion fails", async () => {
     const f = await fixture({});
     await f.seed();

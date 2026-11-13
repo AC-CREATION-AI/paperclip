@@ -98,7 +98,7 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
     });
     const svc = toolAccessPolicyService(db);
     const selectors = { actorType: "agent", agentId: consultantId, connectionId };
-    const candidateTools = ["get_me", "create_branch", "create_pull_request", "fork_repository"];
+    const candidateTools = ["get_me", "create_branch", "create_pull_request", "fork_repository", "create_or_update_file"];
     const blocked = await svc.createPolicy(companyId, {
       name: "Consultant forbidden tools and unverified edits", policyType: "block", priority: 1,
       selectors: { ...selectors, toolNames: catalog.map(entry => entry.toolName).filter(name => !candidateTools.includes(name)) },
@@ -127,6 +127,20 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
         allowIds.add(policy.id);
       }
     }
+    const exactEdit = await svc.createPolicy(companyId, {
+      name: "Four exact models.dev files", policyType: "allow", priority: 2,
+      selectors: { ...selectors, toolName: "create_or_update_file" },
+      conditions: { arguments: {
+        fieldEquals: { owner: "anomalyco", repo: "models.dev", branch: "acc-4108-models" },
+        fieldIn: { path: [
+          "providers/minimax/models/MiniMax-M3.1-Flash.toml",
+          "providers/minimax-cn/models/MiniMax-M3.1-Flash.toml",
+          "providers/minimax-coding-plan/models/MiniMax-M3.1-Flash.toml",
+          "providers/minimax-cn-coding-plan/models/MiniMax-M3.1-Flash.toml",
+        ] },
+      } },
+    });
+    allowIds.add(exactEdit.id);
     app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -147,7 +161,7 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
     expect(fixture.cases.length).toBeGreaterThanOrEqual(34);
     expect(new Set(fixture.cases.map(test => test.name)).size).toBe(fixture.cases.length);
     expect(catalog).toHaveLength(50);
-    expect(allowIds.size).toBe(13); // One policy per atomic tuple and tool; no fieldIn owner/repo pairs.
+    expect(allowIds.size).toBe(14); // Atomic tuples plus one exact scalar-path edit policy.
     try {
       for (const test of fixture.cases) {
         const entry = catalog.find(tool => tool.toolName === test.request.toolName);
@@ -174,4 +188,18 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
       expect(await mutationCounts()).toEqual(baseline);
     }
   }, 60_000);
+
+  it("gives an explicit block precedence over an earlier allow", async () => {
+    const svc = toolAccessPolicyService(db);
+    await svc.createPolicy(companyId, { name: "Earlier broad allow", policyType: "allow", priority: 2,
+      selectors: { agentId: unrelatedId, connectionId, toolName: "get_me" } });
+    const block = await svc.createPolicy(companyId, { name: "Later explicit block", policyType: "block", priority: 999,
+      selectors: { agentId: unrelatedId, connectionId, toolName: "get_me" } });
+    const response = await request(app).post(`/api/companies/${companyId}/tools/policy/test`).send({
+      companyId, actor: { actorType: "agent", actorId: unrelatedId, agentId: unrelatedId },
+      request: { toolName: "get_me", connectionId }, consumeRateLimit: false, writeAuditEvent: false,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.decision).toMatchObject({ allowed: false, reasonCode: "deny_policy_block", matchedPolicyIds: [block.id] });
+  });
 });

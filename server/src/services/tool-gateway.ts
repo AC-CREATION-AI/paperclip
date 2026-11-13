@@ -39,6 +39,7 @@ import { executeSpekoVoiceTool, spekoToolsForSession } from "./voice/speko-agent
 import { captureRunIdentity } from "./run-identity.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { assertBoundedGitHubMutation } from "./git-broker.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import { logger } from "../middleware/logger.js";
 import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
@@ -6195,6 +6196,13 @@ export function createToolGatewayService(
       ms = railwayCommandBudgetMs(parameters);
     }
     const grant = await resolveConnectionGrant(session, connection);
+    if (session.agentId && entry.riskLevel !== "read"
+      && (connection.config.sourceTemplateKey === "github" || connection.transportConfig?.sourceTemplateKey === "github")) {
+      await assertBoundedGitHubMutation(db, {
+        companyId: session.companyId, agentId: session.agentId, connectionId: connection.id, grant,
+        decisionInput: policyInputForTool({ session, tool, parameters, consumeRateLimit: false }),
+      });
+    }
     const restConnector = restConnectorFor(connection);
     if (restConnector) {
       const budgetMs = Math.min(ms, 30_000);

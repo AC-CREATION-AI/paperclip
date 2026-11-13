@@ -14,6 +14,7 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { isGitHubDotCom } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
+import { assertUnboundedGitHubCredentialExport } from "./git-broker.js";
 
 /**
  * Server-side git credentials for managed project checkouts and execution-workspace base
@@ -547,6 +548,13 @@ export async function resolveManagedGitHubCredential(
   if (!selection.grant) return { configured: true, identitySource: selection.identitySource, error: selection.error };
   const acquire = async (selection: Awaited<ReturnType<typeof resolveManagedGitHubIdentitySelection>>) => {
     let grant = selection.grant!;
+    if (context.agentId) {
+      try {
+        await assertUnboundedGitHubCredentialExport(db, companyId, context.agentId, grant.connectionId);
+      } catch {
+        return { configured: true, error: "Argument-scoped GitHub access requires governed tools, not raw credentials" };
+      }
+    }
     if (grant.kind === "user" && grant.subjectUserId) {
       const [membership] = await db.select({ id: companyMemberships.id, role: companyMemberships.membershipRole }).from(companyMemberships).where(and(
         eq(companyMemberships.companyId, companyId),

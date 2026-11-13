@@ -292,5 +292,5 @@ export function isGoogleWorkspaceToolAllowed(
 export function shouldQuarantineNewEntries(
   connection: typeof toolConnections.$inferSelect,
 ): boolean {
-  return Boolean(nativeProviderCatalogFor(connection) || restConnectorFor(connection)) || asRecord(connection.config).quarantineNewEntries === true;
+  return asRecord(connection.config).sourceTemplateKey === "github" || Boolean(nativeProviderCatalogFor(connection) || restConnectorFor(connection)) || asRecord(connection.config).quarantineNewEntries === true;
 }
