@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog, agents, companies, createDb, toolAccessAuditEvents, toolActionRequests,
@@ -208,8 +208,8 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
       selectors, conditions: { arguments: { fieldAbsent: ["cmdString"] } } });
     // Without an agent+connection argument policy this connection is unbounded.
     if (!bounded) {
-      await svc.updatePolicy(companyId, allow.id, { conditions: null });
-      await svc.updatePolicy(companyId, block.id, { conditions: null });
+      await svc.updatePolicy({ companyId, policyId: allow.id, body: { conditions: null } });
+      await svc.updatePolicy({ companyId, policyId: block.id, body: { conditions: null } });
     }
     const response = await request(app).post(`/api/companies/${companyId}/tools/policy/test`).send({
       companyId, actor: { actorType: "agent", actorId: agentId, agentId },
