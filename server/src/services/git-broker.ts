@@ -4,7 +4,7 @@ import type { ToolAccessDecisionInput } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import { isBoundedGitHubPolicy } from "./github-policy-scope.js";
-export { isBoundedGitHubPolicy } from "./github-policy-scope.js";
+export { isBoundedGitHubMutationCandidate, isBoundedGitHubPolicy } from "./github-policy-scope.js";
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
