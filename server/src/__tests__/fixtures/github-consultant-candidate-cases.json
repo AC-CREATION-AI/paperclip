@@ -1,0 +1,929 @@
+{
+  "scope": "Disposable policy-route simulation of the proposed Consultant candidate. Public repository names only; no live IDs, credentials, broker, installation or identity qualification.",
+  "catalog": {
+    "read": [
+      "actions_get",
+      "actions_list",
+      "get_commit",
+      "get_file_contents",
+      "get_job_logs",
+      "get_label",
+      "get_latest_release",
+      "get_me",
+      "get_release_by_tag",
+      "get_tag",
+      "get_team_members",
+      "get_teams",
+      "issue_read",
+      "list_branches",
+      "list_commits",
+      "list_issue_fields",
+      "list_issue_types",
+      "list_issues",
+      "list_pull_requests",
+      "list_releases",
+      "list_repository_collaborators",
+      "list_tags",
+      "pull_request_read",
+      "run_secret_scanning",
+      "search_code",
+      "search_commits",
+      "search_issues",
+      "search_pull_requests",
+      "search_repositories",
+      "search_users",
+      "ui_get"
+    ],
+    "write": [
+      "actions_run_trigger",
+      "add_comment_to_pending_review",
+      "add_issue_comment",
+      "add_reply_to_pull_request_comment",
+      "create_branch",
+      "create_or_update_file",
+      "create_pull_request",
+      "create_repository",
+      "delete_file",
+      "fork_repository",
+      "issue_write",
+      "merge_pull_request",
+      "pull_request_review_write",
+      "push_files",
+      "request_copilot_review",
+      "sub_issue_write",
+      "update_issue_comment",
+      "update_pull_request",
+      "update_pull_request_branch"
+    ]
+  },
+  "profile": {
+    "profileKey": "consultant-github-bounded",
+    "defaultAction": "deny",
+    "includeTools": [
+      "get_me",
+      "get_file_contents",
+      "list_branches",
+      "list_commits",
+      "list_pull_requests",
+      "pull_request_read",
+      "issue_read",
+      "list_issues",
+      "search_issues",
+      "search_code",
+      "search_repositories",
+      "get_commit",
+      "get_tag",
+      "list_tags",
+      "list_releases",
+      "get_latest_release",
+      "get_release_by_tag",
+      "list_repository_collaborators",
+      "get_label"
+    ]
+  },
+  "policies": [
+    {
+      "name": "block tools outside the bounded set",
+      "stage": "A",
+      "policyType": "block",
+      "priority": 1,
+      "toolNames": [
+        "actions_get",
+        "actions_list",
+        "actions_run_trigger",
+        "add_comment_to_pending_review",
+        "add_issue_comment",
+        "add_reply_to_pull_request_comment",
+        "create_repository",
+        "delete_file",
+        "get_job_logs",
+        "get_team_members",
+        "get_teams",
+        "issue_write",
+        "list_issue_fields",
+        "list_issue_types",
+        "merge_pull_request",
+        "pull_request_review_write",
+        "push_files",
+        "request_copilot_review",
+        "run_secret_scanning",
+        "search_commits",
+        "search_pull_requests",
+        "search_users",
+        "sub_issue_write",
+        "ui_get",
+        "update_issue_comment",
+        "update_pull_request",
+        "update_pull_request_branch"
+      ]
+    },
+    {
+      "name": "fork models.dev into org",
+      "stage": "A",
+      "policyType": "allow",
+      "priority": 2,
+      "toolName": "fork_repository",
+      "conditions": {
+        "arguments": {
+          "fieldEquals": {
+            "owner": "anomalyco",
+            "repo": "models.dev",
+            "organization": "AC-CREATION-AI"
+          }
+        }
+      }
+    },
+    {
+      "name": "branch fork OmniRoute",
+      "stage": "A",
+      "policyType": "allow",
+      "priority": 2,
+      "toolName": "create_branch",
+      "conditions": {
+        "arguments": {
+          "fieldEquals": {
+            "owner": "AC-CREATION-AI",
+            "repo": "OmniRoute",
+            "from_branch": "release/v3.8.54",
+            "branch": "acc-4109-capability-overrides"
+          }
+        }
+      }
+    },
+    {
+      "name": "branch fork paperclip",
+      "stage": "A",
+      "policyType": "allow",
+      "priority": 2,
+      "toolName": "create_branch",
+      "conditions": {
+        "arguments": {
+          "fieldEquals": {
+            "owner": "AC-CREATION-AI",
+            "repo": "paperclip",
+            "from_branch": "master",
+            "branch": "acc-4115-openai-compatible-decision"
+          }
+        }
+      }
+    },
+    {
+      "name": "branch fork models.dev",
+      "stage": "B",
+      "policyType": "allow",
+      "priority": 2,
+      "toolName": "create_branch",
+      "conditions": {
+        "arguments": {
+          "fieldEquals": {
+            "owner": "AC-CREATION-AI",
+            "repo": "models.dev",
+            "from_branch": "dev",
+            "branch": "acc-4108-structured-output"
+          }
+        }
+      }
+    },
+    {
+      "name": "PR upstream models.dev",
+      "stage": "A",
+      "policyType": "allow",
+      "priority": 2,
+      "toolName": "create_pull_request",
+      "conditions": {
+        "arguments": {
+          "fieldEquals": {
+            "owner": "anomalyco",
+            "repo": "models.dev",
+            "base": "dev",
+            "head": "AC-CREATION-AI:acc-4108-structured-output"
+          }
+        }
+      }
+    },
+    {
+      "name": "PR upstream OmniRoute",
+      "stage": "A",
+      "policyType": "allow",
+      "priority": 2,
+      "toolName": "create_pull_request",
+      "conditions": {
+        "arguments": {
+          "fieldEquals": {
+            "owner": "cheaper-inference",
+            "repo": "OmniRoute",
+            "base": "release/v3.8.54",
+            "head": "AC-CREATION-AI:acc-4109-capability-overrides"
+          }
+        }
+      }
+    },
+    {
+      "name": "PR upstream paperclip",
+      "stage": "A",
+      "policyType": "allow",
+      "priority": 2,
+      "toolName": "create_pull_request",
+      "conditions": {
+        "arguments": {
+          "fieldEquals": {
+            "owner": "paperclipai",
+            "repo": "paperclip",
+            "base": "master",
+            "head": "AC-CREATION-AI:acc-4115-openai-compatible-decision"
+          }
+        }
+      }
+    },
+    {
+      "name": "edit four exact models.dev files",
+      "stage": "B",
+      "policyType": "allow",
+      "priority": 2,
+      "toolName": "create_or_update_file",
+      "conditions": {
+        "arguments": {
+          "fieldEquals": {
+            "owner": "AC-CREATION-AI",
+            "repo": "models.dev",
+            "branch": "acc-4108-structured-output"
+          },
+          "fieldIn": {
+            "path": [
+              "providers/minimax/models/MiniMax-M3.1-Flash.toml",
+              "providers/minimax-cn/models/MiniMax-M3.1-Flash.toml",
+              "providers/minimax-coding-plan/models/MiniMax-M3.1-Flash.toml",
+              "providers/minimax-cn-coding-plan/models/MiniMax-M3.1-Flash.toml"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "read get_me",
+      "request": {
+        "toolName": "get_me",
+        "arguments": {}
+      },
+      "reasonCode": "allow_profile"
+    },
+    {
+      "name": "read models.dev PRs",
+      "request": {
+        "toolName": "list_pull_requests",
+        "arguments": {
+          "owner": "anomalyco",
+          "repo": "models.dev"
+        }
+      },
+      "reasonCode": "allow_profile"
+    },
+    {
+      "name": "read paperclip upstream file",
+      "request": {
+        "toolName": "get_file_contents",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "path": "README.md"
+        }
+      },
+      "reasonCode": "allow_profile"
+    },
+    {
+      "name": "fork models.dev",
+      "request": {
+        "toolName": "fork_repository",
+        "arguments": {
+          "owner": "anomalyco",
+          "repo": "models.dev",
+          "organization": "AC-CREATION-AI"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "fork other repo same owner",
+      "request": {
+        "toolName": "fork_repository",
+        "arguments": {
+          "owner": "anomalyco",
+          "repo": "other",
+          "organization": "AC-CREATION-AI"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "fork wrong organization",
+      "request": {
+        "toolName": "fork_repository",
+        "arguments": {
+          "owner": "anomalyco",
+          "repo": "models.dev",
+          "organization": "attacker"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "fork missing organization",
+      "request": {
+        "toolName": "fork_repository",
+        "arguments": {
+          "owner": "anomalyco",
+          "repo": "models.dev"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "fork OmniRoute not needed",
+      "request": {
+        "toolName": "fork_repository",
+        "arguments": {
+          "owner": "cheaper-inference",
+          "repo": "OmniRoute",
+          "organization": "AC-CREATION-AI"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "branch OmniRoute fork",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "OmniRoute",
+          "from_branch": "release/v3.8.54",
+          "branch": "acc-4109-capability-overrides"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "branch paperclip fork",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "from_branch": "master",
+          "branch": "acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "branch models.dev fork",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "from_branch": "dev",
+          "branch": "acc-4108-structured-output"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "branch other lot name",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "from_branch": "master",
+          "branch": "acc-4999-unrelated"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "branch lot of another repo",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "from_branch": "master",
+          "branch": "acc-4109-capability-overrides"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "branch missing from_branch",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "branch": "acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "branch synthetic base_ref alias",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "base_ref": "master",
+          "branch": "acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "branch wrong from_branch",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "OmniRoute",
+          "from_branch": "main",
+          "branch": "acc-4109-capability-overrides"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "branch on upstream",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "from_branch": "master",
+          "branch": "acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "branch protected master",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "from_branch": "master",
+          "branch": "master"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "branch cartesian owner/repo",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "OmniRoute",
+          "from_branch": "master",
+          "branch": "acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "PR models.dev",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "anomalyco",
+          "repo": "models.dev",
+          "base": "dev",
+          "head": "AC-CREATION-AI:acc-4108-structured-output",
+          "title": "t"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "PR OmniRoute",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "cheaper-inference",
+          "repo": "OmniRoute",
+          "base": "release/v3.8.54",
+          "head": "AC-CREATION-AI:acc-4109-capability-overrides",
+          "title": "t"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "PR paperclip",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "base": "master",
+          "head": "AC-CREATION-AI:acc-4115-openai-compatible-decision",
+          "title": "t"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "PR head without fork owner",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "base": "master",
+          "head": "acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "PR head from other owner",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "base": "master",
+          "head": "attacker:acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "PR head of another lot",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "base": "master",
+          "head": "AC-CREATION-AI:acc-4108-structured-output"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "PR wrong base",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "base": "main",
+          "head": "AC-CREATION-AI:acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "PR into own fork",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "base": "master",
+          "head": "AC-CREATION-AI:acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "PR cartesian owner/repo",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "OmniRoute",
+          "base": "master",
+          "head": "AC-CREATION-AI:acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "edit exact file",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "branch": "acc-4108-structured-output",
+          "path": "providers/minimax/models/MiniMax-M3.1-Flash.toml",
+          "content": "x",
+          "message": "m"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "edit 4th exact file",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "branch": "acc-4108-structured-output",
+          "path": "providers/minimax-cn-coding-plan/models/MiniMax-M3.1-Flash.toml",
+          "content": "x",
+          "message": "m"
+        }
+      },
+      "reasonCode": "allow_policy"
+    },
+    {
+      "name": "edit other toml",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "branch": "acc-4108-structured-output",
+          "path": "providers/minimax/models/MiniMax-M3.toml"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "edit path traversal",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "branch": "acc-4108-structured-output",
+          "path": "providers/minimax/models/../../../.github/workflows/ci.yml"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "edit workflow",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "branch": "acc-4108-structured-output",
+          "path": ".github/workflows/ci.yml"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "edit missing path",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "branch": "acc-4108-structured-output"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "edit wrong branch",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "branch": "dev",
+          "path": "providers/minimax/models/MiniMax-M3.1-Flash.toml"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "edit upstream directly",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "anomalyco",
+          "repo": "models.dev",
+          "branch": "acc-4108-structured-output",
+          "path": "providers/minimax/models/MiniMax-M3.1-Flash.toml"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "edit paperclip fork",
+      "request": {
+        "toolName": "create_or_update_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "branch": "acc-4115-openai-compatible-decision",
+          "path": "providers/minimax/models/MiniMax-M3.1-Flash.toml"
+        }
+      },
+      "reasonCode": "deny_default"
+    },
+    {
+      "name": "merge forbidden",
+      "request": {
+        "toolName": "merge_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "pullNumber": 1
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "delete forbidden",
+      "request": {
+        "toolName": "delete_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "branch": "acc-4115-openai-compatible-decision",
+          "path": "README.md",
+          "message": "m"
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "batch push forbidden",
+      "request": {
+        "toolName": "push_files",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "models.dev",
+          "branch": "acc-4108-structured-output",
+          "files": [
+            {
+              "path": "providers/minimax/models/MiniMax-M3.1-Flash.toml",
+              "content": "x"
+            }
+          ],
+          "message": "m"
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "repository creation forbidden",
+      "request": {
+        "toolName": "create_repository",
+        "arguments": {
+          "name": "x",
+          "organization": "AC-CREATION-AI"
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "issue creation not in lot 1",
+      "request": {
+        "toolName": "issue_write",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "method": "create",
+          "title": "t"
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "PR update forbidden",
+      "request": {
+        "toolName": "update_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "pullNumber": 1,
+          "state": "closed"
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "review forbidden",
+      "request": {
+        "toolName": "pull_request_review_write",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "method": "submit_pending",
+          "pullNumber": 1
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "workflow dispatch forbidden",
+      "request": {
+        "toolName": "actions_run_trigger",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "method": "run_workflow",
+          "workflow_id": "ci.yml"
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "secret scanning forbidden",
+      "request": {
+        "toolName": "run_secret_scanning",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "files": [
+            "x"
+          ]
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "user search excluded",
+      "request": {
+        "toolName": "search_users",
+        "arguments": {
+          "query": "x"
+        }
+      },
+      "reasonCode": "deny_policy_block"
+    },
+    {
+      "name": "unrelated agent no mutation",
+      "request": {
+        "toolName": "create_branch",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "from_branch": "master",
+          "branch": "acc-4115-openai-compatible-decision"
+        }
+      },
+      "reasonCode": "deny_default",
+      "actor": "unrelated"
+    },
+    {
+      "name": "unrelated agent no read",
+      "request": {
+        "toolName": "get_me",
+        "arguments": {}
+      },
+      "reasonCode": "deny_default",
+      "actor": "unrelated"
+    },
+    {
+      "name": "existing consumer keeps push",
+      "request": {
+        "toolName": "push_files",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "branch": "x",
+          "files": [],
+          "message": "m"
+        }
+      },
+      "reasonCode": "allow_profile",
+      "actor": "consumer"
+    },
+    {
+      "name": "existing consumer keeps merge",
+      "request": {
+        "toolName": "merge_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "pullNumber": 1
+        }
+      },
+      "reasonCode": "allow_profile",
+      "actor": "consumer"
+    },
+    {
+      "name": "existing consumer keeps read",
+      "request": {
+        "toolName": "get_me",
+        "arguments": {}
+      },
+      "reasonCode": "allow_profile",
+      "actor": "consumer"
+    }
+  ]
+}
