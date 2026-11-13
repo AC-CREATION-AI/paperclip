@@ -202,9 +202,9 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
       transport: "mcp_remote", enabled: true, status: "active", config: { sourceTemplateKey: source },
     }).returning();
     const selectors = { agentId, connectionId: connection.id, toolName: "discover" };
-    const allow = await svc.createPolicy(companyId, { name: "Argumentless discovery", policyType: "allow", priority: 0,
+    const allow = await svc.createPolicy(companyId, { name: `Argumentless discovery ${agentId}`, policyType: "allow", priority: 0,
       selectors, conditions: { arguments: { fieldAbsent: ["cmdString", "directory", "connectionName", "timeout"] } } });
-    const block = await svc.createPolicy(companyId, { name: "Missing command", policyType: "block", priority: 1,
+    const block = await svc.createPolicy(companyId, { name: `Missing command ${agentId}`, policyType: "block", priority: 1,
       selectors, conditions: { arguments: { fieldAbsent: ["cmdString"] } } });
     // Without an agent+connection argument policy this connection is unbounded.
     if (!bounded) {
