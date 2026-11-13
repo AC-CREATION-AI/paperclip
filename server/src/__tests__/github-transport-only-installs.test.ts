@@ -237,6 +237,23 @@ describeDatabase("GitHub transport-only connection installs", () => {
     expect(await f.bindings()).toEqual(prior);
   });
 
+  it.each([false, true])("refuses a surviving manual company binding without retained company reach (installed=%s)", async installed => {
+    const f = await fixture();
+    const companyTarget: Install = { targetType: "company", targetId: f.companyId };
+    if (installed) await f.seed([companyTarget], "manual");
+    else await db.insert(toolProfileBindings).values({
+      companyId: f.companyId, profileId: f.appProfile.id, targetType: "company", targetId: f.companyId,
+      metadata: { source: "manual" },
+    });
+    const priorBindings = await f.bindings();
+    const priorInstalls = await f.service.listConnectionInstalls(f.connection.id);
+    await expect(f.service.putConnectionInstalls(f.connection.id, {
+      installs: [{ targetType: "agent", targetId: f.agentIds[7], bindAppProfile: false }],
+    })).rejects.toThrow("company-wide app profile");
+    expect(await f.bindings()).toEqual(priorBindings);
+    expect(await f.service.listConnectionInstalls(f.connection.id)).toEqual(priorInstalls);
+  });
+
   it("allows explicit transport-only new installs even without on-demand configuration", async () => {
     const f = await fixture({});
     const target: Install = { targetType: "agent", targetId: f.agentIds[7], bindAppProfile: false };
