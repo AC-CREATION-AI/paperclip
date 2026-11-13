@@ -266,9 +266,13 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
           .filter(([key]) => !existingKeys.has(key))
           .map(([, install]) => install);
         const removedAppBindings: Array<{ targetType: string; targetId: string }> = [];
-        const companyBindingRemains = bindings.some(binding => binding.targetType === "company"
-          && requested.has(`company:${binding.targetId}`)
-          && requested.get(`company:${binding.targetId}`)?.bindAppProfile !== false);
+        const companyBindings = await tx.select({ id: toolProfileBindings.id })
+          .from(toolProfileBindings).innerJoin(toolProfiles, eq(toolProfiles.id, toolProfileBindings.profileId))
+          .where(and(eq(toolProfileBindings.companyId, connection.companyId), eq(toolProfiles.companyId, connection.companyId),
+            eq(toolProfiles.profileKey, `app:${connection.id}`), eq(toolProfileBindings.targetType, "company"),
+            eq(toolProfileBindings.targetId, connection.companyId))).limit(1);
+        const companyBindingRemains = companyBindings.length > 0
+          && requested.get(`company:${connection.companyId}`)?.bindAppProfile !== false;
         if (companyBindingRemains && [...requested].some(([key, install]) => install.targetType === "agent"
           && (install.bindAppProfile === false || (onDemand && !existingKeys.has(key))))) {
           throw unprocessable("Transport-only agent access cannot inherit a company-wide app profile; remove that broader binding first");
