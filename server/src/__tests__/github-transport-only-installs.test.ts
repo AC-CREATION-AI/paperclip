@@ -226,6 +226,17 @@ describeDatabase("GitHub transport-only connection installs", () => {
     expect((await f.effective(f.agentIds[7])).allowedTools).toEqual([]);
   });
 
+  it("refuses an agent transport-only transition while a broader company app binding survives", async () => {
+    const f = await fixture();
+    const companyTarget: Install = { targetType: "company", targetId: f.companyId };
+    await f.seed([companyTarget]);
+    const prior = await f.bindings();
+    await expect(f.service.putConnectionInstalls(f.connection.id, {
+      installs: [companyTarget, { targetType: "agent", targetId: f.agentIds[7], bindAppProfile: false }],
+    })).rejects.toThrow("company-wide app profile");
+    expect(await f.bindings()).toEqual(prior);
+  });
+
   it("allows explicit transport-only new installs even without on-demand configuration", async () => {
     const f = await fixture({});
     const target: Install = { targetType: "agent", targetId: f.agentIds[7], bindAppProfile: false };

@@ -73,7 +73,11 @@ transport ensemble. Après commit, l’absence de liaison app est durable. Un
 rejeu de la même demande ne recrée pas la liaison : seuls les ajouts admissibles
 peuvent la créer, et `bindAppProfile:false` impose à nouveau son retrait.
 Il n’existe donc plus de seconde étape `unbind` à terminer après installation
-pour ce parcours. Ne pas appeler ensuite `/finish` en activant le profil complet :
+pour ce parcours. Si une liaison app au niveau société survit et accorderait les
+outils au même agent, la transition transport-only est refusée : retirer cette
+liaison plus large doit faire l’objet d’une décision distincte, jamais d’une
+suppression implicite affectant les autres consommateurs.
+Ne pas appeler ensuite `/finish` en activant le profil complet :
 ce serait une nouvelle décision d’accès, pas une réconciliation.
 
 La quarantaine GitHub protège les nouvelles définitions et changements de

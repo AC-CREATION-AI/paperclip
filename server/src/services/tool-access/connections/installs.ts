@@ -266,6 +266,13 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
           .filter(([key]) => !existingKeys.has(key))
           .map(([, install]) => install);
         const removedAppBindings: Array<{ targetType: string; targetId: string }> = [];
+        const companyBindingRemains = bindings.some(binding => binding.targetType === "company"
+          && requested.has(`company:${binding.targetId}`)
+          && requested.get(`company:${binding.targetId}`)?.bindAppProfile !== false);
+        if (companyBindingRemains && [...requested].some(([key, install]) => install.targetType === "agent"
+          && (install.bindAppProfile === false || (onDemand && !existingKeys.has(key))))) {
+          throw unprocessable("Transport-only agent access cannot inherit a company-wide app profile; remove that broader binding first");
+        }
         // Transport-only targets must not retain a stale app binding when reach
         // is added. Existing installs change only on explicit selection.
         for (const [key, install] of requested) {
