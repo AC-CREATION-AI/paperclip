@@ -206,7 +206,8 @@ Agent access: `available` — agent REST and default native `search_api` / `call
 Policy: `tools:manage_connections`; [shared management policy](../../doc/plans/2026-10-13-connection-api-parity.md#authorization-contract). Resolved resources and every affected target are checked; personal ownership remains the responsible user.
 GitHub new and changed definitions remain quarantined even during draft discovery,
 with enable-all or safe-default reads. Unchanged reviewed entries retain their
-state. [Quarantine regressions](../../server/src/__tests__/github-catalog-quarantine.test.ts)
+state. Creation/reconnect keeps `quarantineNewEntries: true`; explicit review IDs
+are required to approve pending entries at finish. [Quarantine regressions](../../server/src/__tests__/github-catalog-quarantine.test.ts)
 use isolated PostgreSQL and synthetic discovery, not live-provider credentials.
 Evidence: `source-only` — [route](../../server/src/routes/tool-access.ts); reviewed in the working tree based on the source commit above.
 Verification: `not-run` — individual operation not executed in this audit; shared authorization and representative family flows are exercised by the authenticated integration suite. Follow the route schema, inspect persistence/audit, and assert owner, scope and revoked-authority denial.

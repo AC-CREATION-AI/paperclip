@@ -30,7 +30,9 @@ an agent-only transport transition. Non-empty saves also remove legacy
 connection-wide include rules, including unchanged lists and removals with no
 new targets. GitHub catalog discovery quarantines new or changed definitions,
 including draft discovery and safe-default reads; reviewed unchanged actions
-retain their state.
+retain their state. GitHub create/reconnect keeps `quarantineNewEntries: true`;
+credential rotation does not approve pending actions. `bindAppProfile: false`
+is the supported transport-only request; no application code writes `onDemandTools`.
 
 ## How to get to it (user POV)
 

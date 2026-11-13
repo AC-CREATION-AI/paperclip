@@ -40,8 +40,13 @@ et ne pas compléter les intents sur la seule foi du transport sain.
 
 ## Installation : transport sans héritage du profil complet
 
-Pour une nouvelle installation MCP à la demande, la liaison automatique au
-profil `app:{connectionId}` n’est pas créée. Le profil minimal doit être préparé
+Le chemin outillé est `bindAppProfile:false` dans la liste `installs`. Le drapeau
+`config.onDemandTools` est seulement lu : aucun code applicatif ni UI du dépôt
+ne l’écrit. Son éventuelle présence dans une configuration existante ne constitue
+pas un parcours de configuration disponible aux agents.
+
+Pour une nouvelle installation MCP portant déjà ce drapeau, la liaison automatique
+au profil `app:{connectionId}` n’est pas créée. Le profil minimal doit être préparé
 séparément ; installer le transport ne lui ajoute pas les 50 entrées de l’app.
 
 Une cible peut aussi demander `bindAppProfile: false` dans son objet `installs`
@@ -81,8 +86,17 @@ Ne pas appeler ensuite `/finish` en activant le profil complet :
 ce serait une nouvelle décision d’accès, pas une réconciliation.
 
 La quarantaine GitHub protège les nouvelles définitions et changements de
-schéma ; elle ne remplace pas le profil minimal. Les entrées actives déjà
-revues ne sont pas révoquées globalement, afin de préserver les consommateurs.
+schéma ; elle ne remplace pas le profil minimal. `quarantineNewEntries:true`
+est volontairement le défaut de toute nouvelle connexion GitHub (managed ou
+PAT `mcp-key`) et reste vrai après reconnexion. C’est un changement de contrat
+par rapport à la base : création et rotation de credential ne valent plus
+approbation implicite des outils. Un `/finish` explicite peut approuver les
+entrées sélectionnées ; une reconnexion seule laisse les entrées déjà en attente
+et les nouvelles entrées en quarantaine, sans les inclure dans le profil.
+Les entrées actives déjà revues et inchangées ne sont pas révoquées globalement,
+afin de préserver les consommateurs. Aucun changement runtime n’est appliqué
+par ce lot. Les deux tests de galerie couvrent cette évolution, la rotation en
+place du secret et la conservation des choix Ask-first.
 
 ## Broker : frontière réelle de dispatch
 
@@ -97,8 +111,14 @@ le contrôle borné. Il faut un grant managed actif avec identité GitHub résol
 un couple exact `(owner, repo)`, et un verdict `allow_policy` dont la policy
 correspondante contient **les deux** valeurs dans le même `fieldEquals`.
 Un `allow_profile`, un grant large ou un `require_approval` ne suffisent pas.
-Les policies `block` correspondantes priment sur un `allow`, même si leur
-priorité numérique vient après.
+Uniquement pour une connexion GitHub persistée et un agent soumis à une policy
+d’arguments explicitement agent+connexion, les policies `block` correspondantes
+priment sur un `allow`, même si leur priorité numérique vient après. La présence
+de bornes est déterminée avant filtrage des arguments : un appel hors borne ne
+peut pas désactiver ce contrôle. Les connexions non-GitHub et les consommateurs
+GitHub non bornés conservent l’ordre numérique historique (première règle
+correspondante). Une `applicationKey` fournie par l’appelant ne change pas ce
+périmètre.
 
 L’évaluateur combine bien `fieldEquals:{owner,repo}` avec d’autres prédicats
 (`fieldIn.path`, `fieldEquals.base_ref`, etc.) dans une même condition : AND
@@ -123,7 +143,7 @@ Commande unique dans un environnement de test isolé muni des dépendances et
 d’embedded PostgreSQL (pas dans le conteneur Paperclip partagé) :
 
 ```sh
-pnpm exec vitest run server/src/__tests__/github-consultant-reference.test.ts server/src/__tests__/github-transport-only-installs.test.ts server/src/__tests__/github-catalog-quarantine.test.ts server/src/__tests__/github-managed-organization-identity.test.ts server/src/__tests__/github-broker-boundary.test.ts server/src/__tests__/github-broker-integration.test.ts
+pnpm exec vitest run server/src/__tests__/github-consultant-reference.test.ts server/src/__tests__/github-transport-only-installs.test.ts server/src/__tests__/github-catalog-quarantine.test.ts server/src/__tests__/github-managed-organization-identity.test.ts server/src/__tests__/github-broker-boundary.test.ts server/src/__tests__/github-broker-integration.test.ts server/src/__tests__/tool-access-service.test.ts
 ```
 
 Sur la flotte, utiliser `build-mcp.build_step` sur le SHA exact avec `test-path`
@@ -165,8 +185,20 @@ antérieurs ne le remplacent pas.
 ## Impact, retour arrière et preuve attendue
 
 Pas de migration de données, dépendance cloud ou secret ajouté.
-Le changement de priorité des blocks peut refuser un allow historiquement plus
-prioritaire : c’est le comportement de sécurité annoncé, à vérifier en QA.
+Le tri block-first global de la première version a été rejeté en QA : cinq rôles
+(QA, Dev Plateforme, Dev Infra, Contre-relecteur, Michel) possèdent sur client-tank
+un allow de découverte sans arguments (priorité 0) qui recouvre un block de
+commande absente (priorité 1). Le tri global supprimerait cette découverte.
+Le correctif borne le tri aux seuls accès GitHub bornés et conserve le verdict
+allow historique de ces connexions non-GitHub. Le banc rejoue cette paire de
+conditions chevauchantes, y compris avec une fausse `applicationKey:"github"`.
+Aucune policy existante n’est réécrite ni aucune permission ajoutée.
+
+La qualification globale reste ouverte : les workflows du fork délèguent aux
+runners amont et aucun run de PR n’a été observé lors de la revue. Le build global
+(`COPILOT_INSTALLATION_INVALID`) et la suite globale (collecte plugin-sdk) échouent
+également sur la base inchangée. Les tests ciblés ne remplacent ni une CI verte
+ni la décision DT sur ce chemin de qualification ; aucune fusion n’est demandée.
 Le retour arrière est le revert de la PR, pas une restauration de credentials.
 Aucun retour arrière runtime n’est effectué par ce lot.
 

@@ -17322,6 +17322,7 @@ describeEmbeddedPostgres("tool access service", () => {
       connect.connectionId,
       {
         enabledCatalogEntryIds: [listEntry.id, updateEntry.id],
+        reviewedCatalogEntryIds: [listEntry.id, updateEntry.id],
         askFirstCatalogEntryIds: [updateEntry.id],
         access: { agentIds: [agent.id] },
       },
@@ -18135,6 +18136,7 @@ describeEmbeddedPostgres("tool access service", () => {
       connect.connectionId,
       {
         enabledCatalogEntryIds: [listEntry.id, updateEntry.id],
+        reviewedCatalogEntryIds: [listEntry.id, updateEntry.id],
         askFirstCatalogEntryIds: [updateEntry.id],
         access: "all_agents",
       },
