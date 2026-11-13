@@ -65,6 +65,52 @@ function deferral() {
   });
 }
 
+describe("transient recovery contract (ACC-4351)", () => {
+  const finishedAt = new Date("2026-11-12T17:42:30.000Z");
+
+  it.each([
+    ["omniroute_transient_upstream", "transient_upstream"],
+    ["omniroute_provider_quota", "provider_quota"],
+  ])("maps the native adapter code %s to %s", (errorCode, family) => {
+    expect(extracted.readHeartbeatRunErrorFamily({ errorCode, resultJson: null })).toBe(family);
+  });
+
+  it("reads the OmniRoute countdown from the run error when no retryNotBefore was persisted", () => {
+    expect(extracted.readTransientRecoveryContractFromRun({
+      errorCode: "omniroute_transient_upstream",
+      resultJson: null,
+      error: "OmniRoute /v1/chat/completions a répondu 429 : Service temporarily unavailable: all targets were skipped by pre-dispatch filters (gemini-4-argon-high 100% conn:5bdd8e8d) reset after 1h 26m 15s",
+      finishedAt,
+    })).toEqual({
+      errorFamily: "transient_upstream",
+      retryNotBefore: new Date("2026-11-12T19:09:15.000Z"),
+    });
+  });
+
+  it("keeps a persisted retryNotBefore over the message countdown", () => {
+    expect(extracted.readTransientRecoveryContractFromRun({
+      errorCode: "claude_transient_upstream",
+      resultJson: { retryNotBefore: "2026-11-12T18:00:00.000Z" },
+      error: "Request rejected (429) · reset after 4m 28s",
+      finishedAt,
+    })?.retryNotBefore?.toISOString()).toBe("2026-11-12T18:00:00.000Z");
+  });
+
+  it("does not open a transient contract for an unclassified failure that mentions a reset", () => {
+    expect(extracted.readTransientRecoveryContractFromRun({
+      errorCode: "acpx_turn_failed",
+      resultJson: null,
+      error: "Request rejected (429) · reset after 4m 28s",
+      finishedAt,
+    })).toBeNull();
+  });
+
+  it("ignores a countdown without a rate-limit signal", () => {
+    expect(extracted.parseRelativeResetAfter("cache reset after 5m", finishedAt)).toBeNull();
+    expect(extracted.parseRelativeResetAfter("429 · reset after soon", finishedAt)).toBeNull();
+  });
+});
+
 describe("heartbeat retry module callbacks", () => {
   it("preserves legacy helper and error-class identity", () => {
     expect(legacy.computeBoundedTransientHeartbeatRetrySchedule).toBe(extracted.computeBoundedTransientHeartbeatRetrySchedule);
