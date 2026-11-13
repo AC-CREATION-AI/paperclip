@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog, agents, companies, createDb, toolAccessAuditEvents, toolActionRequests,
@@ -77,7 +77,7 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
     const [connection] = await db.insert(toolConnections).values({
       companyId, applicationId: application.id, name: "GitHub disposable", uid: randomUUID(),
       transport: "mcp_remote", enabled: true, status: "active",
-      config: { url: "https://github-bench.invalid/mcp" },
+      config: { url: "https://github-bench.invalid/mcp", sourceTemplateKey: "github" },
     }).returning();
     connectionId = connection.id;
     catalog = await db.insert(toolCatalogEntries).values([
@@ -189,17 +189,35 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
     }
   }, 60_000);
 
-  it("gives an explicit block precedence over an earlier allow", async () => {
+  it.each([
+    { source: "github", bounded: true, decision: "deny_policy_block" },
+    { source: "github", bounded: false, decision: "allow_policy" },
+    { source: "client-tank", bounded: true, decision: "allow_policy" },
+  ])("preserves priority except for bounded GitHub: $source / $bounded", async ({ source, bounded, decision }) => {
     const svc = toolAccessPolicyService(db);
-    await svc.createPolicy(companyId, { name: "Earlier broad allow", policyType: "allow", priority: 2,
-      selectors: { agentId: unrelatedId, connectionId, toolName: "get_me" } });
-    const block = await svc.createPolicy(companyId, { name: "Later explicit block", policyType: "block", priority: 999,
-      selectors: { agentId: unrelatedId, connectionId, toolName: "get_me" } });
+    const agentId = randomUUID();
+    await db.insert(agents).values({ id: agentId, companyId, name: "Priority fixture", adapterType: "process", status: "active" });
+    const [connection] = await db.insert(toolConnections).values({
+      companyId, applicationId: catalog[0].applicationId!, name: "Priority connection", uid: randomUUID(),
+      transport: "mcp_remote", enabled: true, status: "active", config: { sourceTemplateKey: source },
+    }).returning();
+    const selectors = { agentId, connectionId: connection.id, toolName: "discover" };
+    const allow = await svc.createPolicy(companyId, { name: "Argumentless discovery", policyType: "allow", priority: 0,
+      selectors, conditions: { arguments: { fieldAbsent: ["cmdString", "directory", "connectionName", "timeout"] } } });
+    const block = await svc.createPolicy(companyId, { name: "Missing command", policyType: "block", priority: 1,
+      selectors, conditions: { arguments: { fieldAbsent: ["cmdString"] } } });
+    // Without an agent+connection argument policy this connection is unbounded.
+    if (!bounded) {
+      await svc.updatePolicy(companyId, allow.id, { conditions: null });
+      await svc.updatePolicy(companyId, block.id, { conditions: null });
+    }
     const response = await request(app).post(`/api/companies/${companyId}/tools/policy/test`).send({
-      companyId, actor: { actorType: "agent", actorId: unrelatedId, agentId: unrelatedId },
-      request: { toolName: "get_me", connectionId }, consumeRateLimit: false, writeAuditEvent: false,
+      companyId, actor: { actorType: "agent", actorId: agentId, agentId },
+      request: { toolName: "discover", connectionId: connection.id, applicationKey: "github", arguments: {} },
+      consumeRateLimit: false, writeAuditEvent: false,
     });
     expect(response.status).toBe(200);
-    expect(response.body.decision).toMatchObject({ allowed: false, reasonCode: "deny_policy_block", matchedPolicyIds: [block.id] });
+    expect(response.body.decision).toMatchObject({ allowed: decision === "allow_policy", reasonCode: decision,
+      matchedPolicyIds: [decision === "allow_policy" ? allow.id : block.id] });
   });
 });
