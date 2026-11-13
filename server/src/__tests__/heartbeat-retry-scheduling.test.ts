@@ -2231,10 +2231,10 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect((retryRun?.contextSnapshot as Record<string, unknown> | null)?.errorFamily).toBe("provider_quota");
   });
 
-  it("does not schedule a retry for an unclassified gateway failure", async () => {
-    // The server no longer guesses a family from an adapter-specific code: an
-    // unclassified failure gets no automatic retry, even when its message
-    // carries a window.
+  it("keeps an unclassified gateway failure on the bounded backoff, not on its announced window", async () => {
+    // The server no longer guesses a family from an adapter-specific code. An
+    // unclassified failure keeps the bounded backoff: the window its message
+    // announces is not read, because nothing classified the failure.
     const companyId = randomUUID();
     const agentId = randomUUID();
     const runId = randomUUID();
@@ -2249,10 +2249,21 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       error: "OmniRoute /v1/chat/completions a répondu 429 : all targets were skipped by pre-dispatch filters " +
         "reset after 9m 47s",
     });
+    const announcedWindow = new Date(now.getTime() + (9 * 60 + 47) * 1000 + 30_000);
 
     const scheduled = await heartbeat.scheduleBoundedRetry(runId, { now, random: () => 0.5 });
 
-    expect(scheduled.outcome).not.toBe("scheduled");
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+    expect(scheduled.dueAt.getTime()).toBeLessThan(announcedWindow.getTime());
+    const retryRun = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scheduled.run.id))
+      .then((rows) => rows[0] ?? null);
+    const contextSnapshot = (retryRun?.contextSnapshot as Record<string, unknown> | null) ?? {};
+    expect(contextSnapshot.errorFamily).toBeUndefined();
+    expect(contextSnapshot.transientRetryNotBefore).toBeUndefined();
   });
 
   describe("run-dispatch module transactions", () => {
