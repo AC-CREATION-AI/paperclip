@@ -37,6 +37,7 @@ const vault = vi.hoisted(() => ({
     value: `test-personal-token-${input.responsibleUserId}`,
   })),
   resolveSecretValue: vi.fn(async () => "test-dedicated-token"),
+  resolveSecretVersion: vi.fn(async () => 1),
 }));
 vi.mock("../services/secrets.js", () => ({ secretService: () => vault }));
 
