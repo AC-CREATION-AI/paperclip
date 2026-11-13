@@ -26,7 +26,8 @@ type Policy = {
 };
 type Case = {
   name: string;
-  actor?: "unrelated" | "consumer";
+  // "hub" is the Consultant calling the second GitHub route, outside the broker.
+  actor?: "unrelated" | "consumer" | "hub";
   request: { toolName: string; arguments: Record<string, unknown> };
   reasonCode: "allow_policy" | "allow_profile" | "deny_default" | "deny_policy_block";
 };
@@ -36,6 +37,7 @@ const fixture = JSON.parse(await readFile(new URL("./fixtures/github-consultant-
   catalog: { read: string[]; write: string[] };
   profile: { profileKey: string; defaultAction: "deny"; includeTools: string[] };
   policies: Policy[];
+  hub: { catalog: Array<{ name: string; riskLevel: "read" | "write" }>; policy: Policy };
   cases: Case[];
 };
 const support = await getEmbeddedPostgresTestSupport();
@@ -48,6 +50,9 @@ describeDatabase("GitHub Consultant candidate policy bench", () => {
   let app: express.Express;
   let companyId: string;
   let connectionId: string;
+  let hubConnectionId: string;
+  let hubCatalog: Array<typeof toolCatalogEntries.$inferSelect>;
+  let hubBlockId: string;
   const consultantId = randomUUID();
   const unrelatedId = randomUUID();
   const consumerId = randomUUID();
@@ -132,6 +137,36 @@ describeDatabase("GitHub Consultant candidate policy bench", () => {
       else blockId = created.id;
     }
 
+    // Second GitHub route (hub), outside the bounded broker, with the live
+    // catalog risk levels: several writes are stored as `read` there.
+    const [hubApplication] = await db.insert(toolApplications).values({
+      companyId, name: "GitHub hub route", applicationKey: "hub-github", type: "mcp_http", status: "active",
+    }).returning();
+    const [hubConnection] = await db.insert(toolConnections).values({
+      companyId, applicationId: hubApplication.id, name: "Hub GitHub disposable", uid: randomUUID(),
+      transport: "mcp_remote", enabled: true, status: "active",
+      config: { url: "https://hub-bench.invalid/github/mcp" },
+    }).returning();
+    hubConnectionId = hubConnection.id;
+    hubCatalog = await db.insert(toolCatalogEntries).values(fixture.hub.catalog.map(tool => ({
+      companyId, applicationId: hubApplication.id, connectionId: hubConnectionId, name: tool.name,
+      toolName: tool.name, riskLevel: tool.riskLevel, isReadOnly: tool.riskLevel === "read",
+      isWrite: tool.riskLevel === "write", status: "active" as const, versionHash: "bounded-offline-v1",
+    }))).returning();
+    // Worst case: a future profile opening the whole hub connection to the Consultant.
+    const [hubProfile] = await db.insert(toolProfiles).values({
+      companyId, profileKey: "consultant-hub-worst-case", name: "Consultant hub worst case", defaultAction: "deny",
+    }).returning();
+    await db.insert(toolProfileBindings).values({ companyId, profileId: hubProfile.id, targetType: "agent", targetId: consultantId });
+    await db.insert(toolProfileEntries).values({
+      companyId, profileId: hubProfile.id, selectorType: "connection", effect: "include", connectionId: hubConnectionId,
+    });
+    const hubBlock = await svc.createPolicy(companyId, {
+      name: fixture.hub.policy.name, policyType: "block", priority: fixture.hub.policy.priority,
+      selectors: { actorType: "agent", agentId: consultantId, connectionId: hubConnectionId, toolNames: fixture.hub.policy.toolNames },
+    });
+    hubBlockId = hubBlock.id;
+
     app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
@@ -173,12 +208,13 @@ describeDatabase("GitHub Consultant candidate policy bench", () => {
     const observed: Array<{ name: string; expected: string; actual: string }> = [];
     try {
       for (const test of fixture.cases) {
-        const entry = catalog.find(tool => tool.toolName === test.request.toolName);
+        const onHub = test.actor === "hub";
+        const entry = (onHub ? hubCatalog : catalog).find(tool => tool.toolName === test.request.toolName);
         expect(entry, test.name).toBeDefined();
         const agentId = test.actor === "unrelated" ? unrelatedId : test.actor === "consumer" ? consumerId : consultantId;
         const response = await request(app).post(`/api/companies/${companyId}/tools/policy/test`).send({
           companyId, actor: { actorType: "agent", actorId: agentId, agentId },
-          request: { ...test.request, connectionId, catalogEntryId: entry!.id },
+          request: { ...test.request, connectionId: onHub ? hubConnectionId : connectionId, catalogEntryId: entry!.id },
           consumeRateLimit: false, writeAuditEvent: false,
         });
         expect(response.status, test.name).toBe(200);
@@ -193,7 +229,7 @@ describeDatabase("GitHub Consultant candidate policy bench", () => {
           expect(matched, test.name).toHaveLength(1);
           expect(allowIds.has(matched[0]), test.name).toBe(true);
         } else if (test.reasonCode === "deny_policy_block") {
-          expect(matched, test.name).toEqual([blockId]);
+          expect(matched, test.name).toEqual([onHub ? hubBlockId : blockId]);
         } else expect(matched, test.name).toEqual([]);
       }
     } finally {

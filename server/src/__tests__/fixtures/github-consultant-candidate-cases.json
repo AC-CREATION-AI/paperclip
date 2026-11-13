@@ -260,6 +260,139 @@
       }
     }
   ],
+  "hub": {
+    "catalog": [
+      {
+        "name": "get_file_contents",
+        "riskLevel": "read"
+      },
+      {
+        "name": "list_pull_requests",
+        "riskLevel": "read"
+      },
+      {
+        "name": "get_pull_request_files",
+        "riskLevel": "read"
+      },
+      {
+        "name": "get_pull_request_reviews",
+        "riskLevel": "read"
+      },
+      {
+        "name": "get_pull_request_status",
+        "riskLevel": "read"
+      },
+      {
+        "name": "list_issues",
+        "riskLevel": "read"
+      },
+      {
+        "name": "search_code",
+        "riskLevel": "read"
+      },
+      {
+        "name": "search_issues",
+        "riskLevel": "read"
+      },
+      {
+        "name": "search_users",
+        "riskLevel": "read"
+      },
+      {
+        "name": "create_pull_request",
+        "riskLevel": "write"
+      },
+      {
+        "name": "create_pull_request_review",
+        "riskLevel": "write"
+      },
+      {
+        "name": "list_branches",
+        "riskLevel": "read"
+      },
+      {
+        "name": "create_branch",
+        "riskLevel": "write"
+      },
+      {
+        "name": "delete_file",
+        "riskLevel": "write"
+      },
+      {
+        "name": "create_issue",
+        "riskLevel": "write"
+      },
+      {
+        "name": "search_repositories",
+        "riskLevel": "read"
+      },
+      {
+        "name": "fork_repository",
+        "riskLevel": "read"
+      },
+      {
+        "name": "push_files",
+        "riskLevel": "read"
+      },
+      {
+        "name": "add_issue_comment",
+        "riskLevel": "read"
+      },
+      {
+        "name": "get_issue",
+        "riskLevel": "read"
+      },
+      {
+        "name": "get_pull_request",
+        "riskLevel": "read"
+      },
+      {
+        "name": "get_pull_request_comments",
+        "riskLevel": "read"
+      },
+      {
+        "name": "list_commits",
+        "riskLevel": "read"
+      },
+      {
+        "name": "create_or_update_file",
+        "riskLevel": "write"
+      },
+      {
+        "name": "merge_pull_request",
+        "riskLevel": "read"
+      },
+      {
+        "name": "update_issue",
+        "riskLevel": "write"
+      },
+      {
+        "name": "update_pull_request_branch",
+        "riskLevel": "write"
+      }
+    ],
+    "policy": {
+      "name": "block hub GitHub writes for the Consultant",
+      "stage": "A",
+      "policyType": "block",
+      "priority": 1,
+      "toolNames": [
+        "add_issue_comment",
+        "create_branch",
+        "create_issue",
+        "create_or_update_file",
+        "create_pull_request",
+        "create_pull_request_review",
+        "delete_file",
+        "fork_repository",
+        "merge_pull_request",
+        "push_files",
+        "search_users",
+        "update_issue",
+        "update_pull_request_branch"
+      ]
+    }
+  },
   "cases": [
     {
       "name": "read get_me",
@@ -924,6 +1057,115 @@
       },
       "reasonCode": "allow_profile",
       "actor": "consumer"
+    },
+    {
+      "name": "hub misclassified merge blocked",
+      "request": {
+        "toolName": "merge_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "pullNumber": 1
+        }
+      },
+      "reasonCode": "deny_policy_block",
+      "actor": "hub"
+    },
+    {
+      "name": "hub misclassified push blocked",
+      "request": {
+        "toolName": "push_files",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "branch": "x",
+          "files": [],
+          "message": "m"
+        }
+      },
+      "reasonCode": "deny_policy_block",
+      "actor": "hub"
+    },
+    {
+      "name": "hub misclassified fork blocked",
+      "request": {
+        "toolName": "fork_repository",
+        "arguments": {
+          "owner": "anomalyco",
+          "repo": "models.dev"
+        }
+      },
+      "reasonCode": "deny_policy_block",
+      "actor": "hub"
+    },
+    {
+      "name": "hub misclassified comment blocked",
+      "request": {
+        "toolName": "add_issue_comment",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "issue_number": 1,
+          "body": "b"
+        }
+      },
+      "reasonCode": "deny_policy_block",
+      "actor": "hub"
+    },
+    {
+      "name": "hub delete blocked",
+      "request": {
+        "toolName": "delete_file",
+        "arguments": {
+          "owner": "AC-CREATION-AI",
+          "repo": "paperclip",
+          "path": "README.md",
+          "branch": "x",
+          "message": "m"
+        }
+      },
+      "reasonCode": "deny_policy_block",
+      "actor": "hub"
+    },
+    {
+      "name": "hub create issue blocked",
+      "request": {
+        "toolName": "create_issue",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "title": "t"
+        }
+      },
+      "reasonCode": "deny_policy_block",
+      "actor": "hub"
+    },
+    {
+      "name": "hub create PR blocked",
+      "request": {
+        "toolName": "create_pull_request",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip",
+          "base": "master",
+          "head": "x",
+          "title": "t"
+        }
+      },
+      "reasonCode": "deny_policy_block",
+      "actor": "hub"
+    },
+    {
+      "name": "hub read still allowed",
+      "request": {
+        "toolName": "list_pull_requests",
+        "arguments": {
+          "owner": "paperclipai",
+          "repo": "paperclip"
+        }
+      },
+      "reasonCode": "allow_profile",
+      "actor": "hub"
     }
   ]
 }
