@@ -23,6 +23,7 @@ import {
 import { secretService } from "../services/secrets.js";
 import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { createToolGatewayService } from "../services/tool-gateway.js";
+import { readSignedToolArgumentsPayload } from "../services/tool-content-guards.js";
 import { githubCredentialsFixture } from "./helpers/github-credentials-fixture.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -293,14 +294,28 @@ if (!support.supported) console.warn(`Skipping ACC-4308 GitHub broker integratio
     await expect(f.gateway.executeTool({ sessionToken: f.session.token, tool: f.tool.name,
       parameters: pairs[0], idempotencyKey: randomUUID() })).rejects.toMatchObject({ reasonCode: "approval_required" });
     const [action] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, f.input.companyId));
-    await f.gateway.approveActionRequest({ companyId: f.input.companyId, actionRequestId: action.id, actor: { userId: "A" } });
+    expect(action.status).toBe("pending");
+    expect(readSignedToolArgumentsPayload({ signedArguments: action.signedArguments,
+      invocationId: action.invocationId, toolName: f.tool.name,
+      signingSecret: "github-broker-integration-test-only" })).toMatchObject({
+      executionOnApprove: true, arguments: pairs[0],
+    });
+    expect(f.calls).toEqual([]);
+    // Approval executes the signed operation immediately. Change the bound before
+    // approval, not after a successful provider call has already consumed it.
     await db.update(toolPolicies).set({ enabled: false }).where(eq(toolPolicies.id, review.id));
     for (const policy of await db.select().from(toolPolicies).where(eq(toolPolicies.companyId, f.input.companyId))) {
       if (policy.policyType === "allow") await db.update(toolPolicies)
         .set({ conditions: { arguments: { fieldEquals: pairs[1] } } }).where(eq(toolPolicies.id, policy.id));
     }
-    await expect(f.gateway.executeTool({ sessionToken: f.session.token, tool: f.tool.name,
-      approvedActionRequestId: action.id, parameters: pairs[1] })).rejects.toMatchObject({ status: 403 });
+    const outcome = await f.gateway.approveActionRequest({ companyId: f.input.companyId,
+      actionRequestId: action.id, actor: { userId: "A" } });
+    expect(outcome).toMatchObject({ status: "failed",
+      error: expect.stringContaining("explicit allow for this owner and repository") });
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, action.invocationId));
+    expect(invocation).toMatchObject({ status: "failed", approvalState: "approved",
+      errorMessage: expect.stringContaining("explicit allow for this owner and repository") });
+    expect(JSON.parse(invocation.argumentsSummary!.summary)).toEqual(pairs[0]);
     expect(f.calls).toEqual([]);
   });
 
