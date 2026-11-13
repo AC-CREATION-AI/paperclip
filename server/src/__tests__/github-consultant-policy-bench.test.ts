@@ -25,12 +25,12 @@ const fixture = JSON.parse(await readFile(new URL("./fixtures/github-consultant-
   cases: Case[];
 };
 const support = await getEmbeddedPostgresTestSupport();
-if (!support.supported) console.warn(`Skipping ACC-4308 policy bench: ${support.reason}`);
+if (!support.supported) console.warn(`Skipping policy bench: ${support.reason}`);
 const describeDatabase = support.supported ? describe : describe.skip;
 
 // Reference policy simulation only: no installation, broker dispatch, or live GitHub calls.
 // Never accept an external test DATABASE_URL; the helper creates a disposable database.
-describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
+describeDatabase("GitHub Consultant reference policy bench", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | undefined;
   let db: ReturnType<typeof createDb>;
   let app: express.Express;
@@ -43,13 +43,13 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
   const allowIds = new Set<string>();
   let blockId: string;
   const upstream = [
-    { owner: "anomalyco", repo: "models.dev", base: "dev" },
-    { owner: "cheaper-inference", repo: "OmniRoute", base: "release/v3.8.54" },
+    { owner: "example-upstream", repo: "widgets.dev", base: "dev" },
+    { owner: "sample-labs", repo: "router", base: "release/v1.2.3" },
     { owner: "paperclipai", repo: "paperclip", base: "master" },
   ];
   const existingForks = [
-    { owner: "AC-CREATION-AI", repo: "OmniRoute", base: "release/v3.8.54" },
-    { owner: "AC-CREATION-AI", repo: "paperclip", base: "master" },
+    { owner: "example-org", repo: "router", base: "release/v1.2.3" },
+    { owner: "example-org", repo: "paperclip", base: "master" },
   ];
   async function mutationCounts() {
     // Aggregates, not unbounded audit/counter row downloads. All fixture-company scoped.
@@ -64,7 +64,7 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
     database = await startEmbeddedPostgresTestDatabase("paperclip-github-consultant-policy-");
     db = createDb(database.connectionString);
     const [company] = await db.insert(companies).values({
-      name: "ACC-4308 disposable bench", issuePrefix: `GB${randomUUID().slice(0, 6)}`,
+      name: "Disposable bench", issuePrefix: `GB${randomUUID().slice(0, 6)}`,
     }).returning();
     companyId = company.id;
     await db.insert(agents).values([
@@ -85,7 +85,7 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
       ...fixture.catalog.write.map(toolName => ({ toolName, riskLevel: "write" as const })),
     ].map(tool => ({ ...tool, companyId, applicationId: application.id, connectionId,
       name: tool.toolName, isReadOnly: tool.riskLevel === "read", isWrite: tool.riskLevel === "write",
-      status: "active" as const, versionHash: "acc-4308-offline-v1" }))).returning();
+      status: "active" as const, versionHash: "bounded-offline-v1" }))).returning();
     const [profile] = await db.insert(toolProfiles).values({
       companyId, profileKey: "consultant-get-me-only", name: "Consultant minimal read", defaultAction: "deny",
     }).returning();
@@ -111,13 +111,13 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
     });
     for (const tuple of [...upstream, ...existingForks]) {
       for (const toolName of ["create_branch", "create_pull_request", "fork_repository"]) {
-        if (toolName === "fork_repository" && tuple.owner === "AC-CREATION-AI") continue;
+        if (toolName === "fork_repository" && tuple.owner === "example-org") continue;
         const fieldEquals: Record<string, unknown> = { owner: tuple.owner, repo: tuple.repo };
         const fieldMatches: Record<string, string> = {};
-        if (toolName === "fork_repository") fieldEquals.organization = "AC-CREATION-AI";
+        if (toolName === "fork_repository") fieldEquals.organization = "example-org";
         else {
           fieldEquals[toolName === "create_branch" ? "base_ref" : "base"] = tuple.base;
-          fieldMatches[toolName === "create_branch" ? "branch" : "head"] = "^acc-[0-9]+-";
+          fieldMatches[toolName === "create_branch" ? "branch" : "head"] = "^feature-[0-9]+-";
         }
         const policy = await svc.createPolicy(companyId, {
           name: `${toolName} ${tuple.owner}/${tuple.repo}`, policyType: "allow", priority: 2,
@@ -128,15 +128,15 @@ describeDatabase("ACC-4308 GitHub Consultant reference policy bench", () => {
       }
     }
     const exactEdit = await svc.createPolicy(companyId, {
-      name: "Four exact models.dev files", policyType: "allow", priority: 2,
+      name: "Four exact widgets.dev files", policyType: "allow", priority: 2,
       selectors: { ...selectors, toolName: "create_or_update_file" },
       conditions: { arguments: {
-        fieldEquals: { owner: "anomalyco", repo: "models.dev", branch: "acc-4108-models" },
+        fieldEquals: { owner: "example-upstream", repo: "widgets.dev", branch: "feature-101-widgets" },
         fieldIn: { path: [
-          "providers/minimax/models/MiniMax-M3.1-Flash.toml",
-          "providers/minimax-cn/models/MiniMax-M3.1-Flash.toml",
-          "providers/minimax-coding-plan/models/MiniMax-M3.1-Flash.toml",
-          "providers/minimax-cn-coding-plan/models/MiniMax-M3.1-Flash.toml",
+          "catalog/alpha/items/item.toml",
+          "catalog/beta/items/item.toml",
+          "catalog/gamma/items/item.toml",
+          "catalog/delta/items/item.toml",
         ] },
       } },
     });

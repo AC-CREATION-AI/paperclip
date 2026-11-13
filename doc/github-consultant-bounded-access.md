@@ -1,15 +1,14 @@
-# Accès GitHub borné du Consultant — lot mécanisme (ACC-4308)
+# Accès GitHub borné d’un agent consultant — lot mécanisme
 
 ## Périmètre et absence d’application
 
 Ce lot ne configure ni profil, ni policy, ni grant, ni connexion dans la société.
-Les intentions `a737f60f-32f3-4ecd-b7e1-aba0e281fcb8` et
-`af04848f-0ea7-414d-816b-66f41fde4839` doivent rester inchangées.
-Les fixtures du banc ne s’écrivent que dans une base de test jetable.
-Aucun OAuth, troisième intent, redémarrage ou déploiement n’est requis.
-
-Source de cadrage : ACC-4298, document `decision`, révision
-`1c504d7d` (13/11/2026) ; exécution Infra ultérieure : ACC-4217.
+Les intentions de connexion en attente doivent rester inchangées.
+Les fixtures du banc ne s’écrivent que dans une base de test jetable ; owners,
+dépôts, branches et chemins y sont synthétiques.
+Aucun OAuth, nouvel intent, redémarrage ou déploiement n’est requis.
+Les références de suivi internes (tickets, identifiants d’instance) restent hors
+du dépôt.
 
 ## Identité : refus explicite plutôt qu’identité inférée
 
@@ -19,7 +18,7 @@ pas une identité d’agent. La contrainte SQL impose que ses deux sujets
 inchangé : agent dédié, utilisateur responsable, délégation admissible.
 Aucun fallback organisationnel n’est ajouté.
 
-Dans le relevé du 13/11, le grant organisationnel visible de `181a5395-…`
+Sur une connexion partagée observée, le grant organisationnel visible
 a `providerTenant = null` et une référence `credentials.authorization`.
 Le resolver managed exige au contraire `providerTenant.github` et
 `oauth.access_token`. Ajouter `organization` au filtre SQL ne résoudrait donc
@@ -28,14 +27,13 @@ explicite et une politique de non-export ; le bearer seul ne prouve rien.
 
 **Limite de l’inventaire antérieur :** GET grants filtre les grants personnels
 et agents pour un appelant non-manager. Une liste contenant uniquement le grant
-organisationnel ne prouve pas son unicité. Le broker a effectivement résolu un
-grant `dedicated` pour Dev Plateforme pendant le diagnostic, sans afficher le
-jeton. Ce contrôle n’est pas une preuve d’identité pour le Consultant.
-Les sept consommateurs existants ne sont ni migrés ni reconfigurés.
+organisationnel ne prouve pas son unicité. La résolution d’un grant `dedicated`
+pour un autre agent pendant le diagnostic n’est pas une preuve d’identité pour
+le consultant. Les consommateurs existants ne sont ni migrés ni reconfigurés.
 Le parcours OAuth par-agent abandonné n’est pas réintroduit.
 
 L’option « refus documenté » du livrable 1 est retenue. Le lot ne prétend pas que
-le Consultant peut déjà utiliser la connexion ; Infra doit conserver ce refus
+le consultant peut déjà utiliser la connexion ; l’exploitation doit conserver ce refus
 et ne pas compléter les intents sur la seule foi du transport sain.
 
 ## Installation : transport sans héritage du profil complet
@@ -56,13 +54,13 @@ Dans la transaction verrouillée, la liaison app de cette cible est retirée ava
 la création de l’installation. Aucune entrée du catalogue, aucun autre profil,
 aucune liaison d’un autre agent ne sont supprimés.
 
-Exemple de payload, à préparer par Infra mais **ne pas appliquer dans ce lot** :
+Exemple de payload, à préparer par l’exploitation mais **ne pas appliquer dans ce lot** :
 
 ```json
 {
   "installs": [
     {"targetType":"agent","targetId":"<agent existant conservé>"},
-    {"targetType":"agent","targetId":"<Consultant>","bindAppProfile":false}
+    {"targetType":"agent","targetId":"<consultant>","bindAppProfile":false}
   ]
 }
 ```
@@ -100,8 +98,19 @@ place du secret et la conservation des choix Ask-first.
 
 ## Broker : frontière réelle de dispatch
 
-Les mutations GitHub bornées sont revérifiées dans `executeRemoteHttpTool`,
-après résolution du grant, avant client fournisseur et acquisition des headers.
+Les mutations GitHub bornées sont revérifiées dans `executeRemoteHttpTool` et
+`executeLocalStdioTool`, après résolution du grant, avant client fournisseur et
+acquisition des headers.
+
+La frontière ne se fie pas au `riskLevel` du catalogue ni aux annotations du
+fournisseur : GitHub n’a pas de classifieur revu, et le classifieur générique
+range par exemple `merge_pull_request`, `fork_repository`, `push_files` et
+`add_issue_comment` en `read`. Seuls les outils de lecture revus listés dans
+`github-policy-scope.ts` sont exemptés, et uniquement s’ils sont stockés en
+`read`. Tout autre outil, y compris inconnu ou renommé, passe par le broker
+(défaut fermé). Une entrée déjà active en `read` est donc couverte sans
+republication du catalogue. Les consommateurs sans policy bornée conservent
+leur contrat : le broker revient immédiatement.
 Les vrais arguments du dispatch (y compris ceux d’une requête approuvée) passent
 à l’évaluateur commun. Aucun résultat de préflight fourni par l’appelant ne fait
 foi.
@@ -146,9 +155,8 @@ d’embedded PostgreSQL (pas dans le conteneur Paperclip partagé) :
 pnpm exec vitest run server/src/__tests__/github-consultant-reference.test.ts server/src/__tests__/github-transport-only-installs.test.ts server/src/__tests__/github-catalog-quarantine.test.ts server/src/__tests__/github-managed-organization-identity.test.ts server/src/__tests__/github-broker-boundary.test.ts server/src/__tests__/github-broker-integration.test.ts server/src/__tests__/tool-access-service.test.ts
 ```
 
-Sur la flotte, utiliser `build-mcp.build_step` sur le SHA exact avec `test-path`
-pour chaque fichier, puis `build_status`. Le service ne reçoit aucune clé ni
-aucun payload de configuration de la connexion réelle.
+Dans un service de build isolé, lancer chaque fichier au SHA exact. Ce service
+ne reçoit aucune clé ni aucun payload de configuration de la connexion réelle.
 Le JSON de cas est `server/src/__tests__/fixtures/github-consultant-policy-cases.json`.
 Le banc HTTP appelle réellement `/tools/policy/test` avec
 `consumeRateLimit:false` et `writeAuditEvent:false`, sans appel fournisseur.
@@ -158,37 +166,25 @@ Le banc inclut une édition scalaire `create_or_update_file` limitée aux quatre
 chemins exacts, avec `owner`, `repo` et branche dans le même `fieldEquals` et
 `path` dans `fieldIn`. Les variantes mauvais owner/repo, chemin absent, autre
 fichier et traversée de chemin sont refusées. Les modifications de contenu
-elles-mêmes restent à valider dans ACC-4108 : une borne de chemin ne vérifie pas
+elles-mêmes restent à valider séparément : une borne de chemin ne vérifie pas
 que seul `structured_output` change.
 `push_files` reste exclu : le AND sur un chemin scalaire ne prouve pas que chaque
 élément de `files[]` respecte ces quatre fichiers. Aucun répertoire n’est ouvert.
-Infra doit fournir une preuve distincte avant d’activer l’écriture par lot.
+L’exploitation doit fournir une preuve distincte avant d’activer l’écriture par lot.
 
-## Premières preuves exécutées (pas un verdict final)
+## Preuves d’exécution
 
-Moteur `build-mcp` : `0d84b7cf2800931caa222f071d4d79f8488208fed5b619db0587b5c4d904720d`.
-Les deux jobs ci-dessous ont tourné sous UID/GID 1000, réseau coupé pour le test,
-caches node_modules / cargo / pnpm warm ; aucun OOM.
-
-| SHA | Job / étape | Résultat | Durée étape / pic |
-|---|---|---|---|
-| `df9006671bb3636f9c510778ef58ff7fe4e69e7f` | `e1603f4d-19b8-4625-a4ed-b2c295eee597`, github-operation-credentials | rc 0 ; 26 passés, 0 skipped | 44 s / 1666 Mo |
-| `fc0cf2fab40cda2f2b1d4c7de83105befb85fc5c` | `fa04c202-9919-4c53-878d-ab2823aedd0b`, tests nouveaux avant correctif | rc 1 ; 18 échecs, 1 passé, 0 skipped | 40 s / 2175 Mo |
-| `2c716e7014219fac9aec9eac760811648ecd3f66` | `8eac4736-f776-45ad-a557-f2e8ffa50435`, installation corrigée | rc 0 ; 19 passés, 0 skipped | 38 s / 1870 Mo |
-
-Le RED établit notamment `app binding still present before reach insert`,
-la recréation d’un profil complet pour le nouvel agent et l’absence d’autorisation
-sur unbind d’une cible inchangée. Ce SHA test-first n’est pas une version livrable.
-Le résultat GREEN doit être relevé sur le SHA qui porte le correctif ; ces résultats
-antérieurs ne le remplacent pas.
+Les identifiants de jobs, durées et SHA des exécutions sont conservés dans le
+suivi interne, pas dans ce document. Un SHA test-first n’est pas une version
+livrable ; le résultat GREEN doit être relevé sur le SHA qui porte le correctif.
 
 ## Impact, retour arrière et preuve attendue
 
 Pas de migration de données, dépendance cloud ou secret ajouté.
-Le tri block-first global de la première version a été rejeté en QA : cinq rôles
-(QA, Dev Plateforme, Dev Infra, Contre-relecteur, Michel) possèdent sur client-tank
-un allow de découverte sans arguments (priorité 0) qui recouvre un block de
-commande absente (priorité 1). Le tri global supprimerait cette découverte.
+Le tri block-first global de la première version a été rejeté en revue : des
+rôles existants possèdent, sur une connexion non-GitHub, un allow de découverte
+sans arguments (priorité 0) qui recouvre un block de commande absente
+(priorité 1). Le tri global supprimerait cette découverte.
 Le correctif borne le tri aux seuls accès GitHub bornés et conserve le verdict
 allow historique de ces connexions non-GitHub. Le banc rejoue cette paire de
 conditions chevauchantes, y compris avec une fausse `applicationKey:"github"`.
@@ -198,7 +194,7 @@ La qualification globale reste ouverte : les workflows du fork délèguent aux
 runners amont et aucun run de PR n’a été observé lors de la revue. Le build global
 (`COPILOT_INSTALLATION_INVALID`) et la suite globale (collecte plugin-sdk) échouent
 également sur la base inchangée. Les tests ciblés ne remplacent ni une CI verte
-ni la décision DT sur ce chemin de qualification ; aucune fusion n’est demandée.
+ni la décision de qualification correspondante ; aucune fusion n’est demandée.
 Le retour arrière est le revert de la PR, pas une restauration de credentials.
 Aucun retour arrière runtime n’est effectué par ce lot.
 

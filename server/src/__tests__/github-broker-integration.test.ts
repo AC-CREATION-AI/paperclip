@@ -43,19 +43,19 @@ const vault = vi.hoisted(() => ({
 vi.mock("../services/secrets.js", () => ({ secretService: () => vault }));
 
 const support = await getEmbeddedPostgresTestSupport();
-if (!support.supported) console.warn(`Skipping ACC-4308 GitHub broker integration: ${support.reason}`);
+if (!support.supported) console.warn(`Skipping GitHub broker integration: ${support.reason}`);
 
 // Never borrow DATABASE_URL or an external credential-test database. The standard
 // helper creates a unique disposable cluster/database and owns its cleanup.
-(support.supported ? describe : describe.skip)("ACC-4308 GitHub broker database integration", () => {
+(support.supported ? describe : describe.skip)("GitHub broker database integration", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | undefined;
   let db: ReturnType<typeof createDb>;
   const { seed, grant } = githubCredentialsFixture(() => db);
   type Seed = Awaited<ReturnType<typeof seed>>;
   type Grant = Awaited<ReturnType<typeof grant>>;
   const pairs = [
-    { owner: "anomalyco", repo: "models.dev" },
-    { owner: "cheaper-inference", repo: "OmniRoute" },
+    { owner: "example-upstream", repo: "widgets.dev" },
+    { owner: "sample-labs", repo: "router" },
   ];
 
   beforeAll(async () => {
@@ -75,12 +75,12 @@ if (!support.supported) console.warn(`Skipping ACC-4308 GitHub broker integratio
     });
   }
 
-  async function bound(input: Seed, selected: Grant) {
+  async function bound(input: Seed, selected: Grant, toolName = "create_branch") {
     return db.insert(toolPolicies).values(pairs.map((pair) => ({
       companyId: input.companyId,
-      name: `Allow create_branch ${pair.owner}/${pair.repo}`,
+      name: `Allow ${toolName} ${pair.owner}/${pair.repo}`,
       policyType: "allow" as const,
-      selectors: { agentId: input.agentId, connectionId: selected.connectionId, toolName: "create_branch" },
+      selectors: { agentId: input.agentId, connectionId: selected.connectionId, toolName },
       conditions: { arguments: { fieldEquals: pair } },
     }))).returning();
   }
@@ -245,18 +245,21 @@ if (!support.supported) console.warn(`Skipping ACC-4308 GitHub broker integratio
     expectNoVaultRead();
   });
 
-  async function gatewayFixture() {
+  async function gatewayFixture(options: {
+    toolName?: string; riskLevel?: "read" | "write"; annotations?: Record<string, unknown>; bounded?: boolean;
+  } = {}) {
+    const { toolName = "create_branch", riskLevel = "write", annotations = {}, bounded = true } = options;
     const input = await seed();
     const selected = await grant(input, "robot", true);
-    await bound(input, selected);
+    if (bounded) await bound(input, selected, toolName);
     await broadProfile(input);
     const [connection] = await db.update(toolConnections).set({
       healthStatus: "ok", config: { sourceTemplateKey: "github", url: "https://8.8.8.8/mcp" },
     }).where(eq(toolConnections.id, selected.connectionId)).returning();
     await db.insert(toolCatalogEntries).values({
       companyId: input.companyId, applicationId: connection.applicationId, connectionId: connection.id,
-      entryKind: "tool", name: "create_branch", toolName: "create_branch", status: "active",
-      riskLevel: "write", isReadOnly: false, isWrite: true, versionHash: "broker-integration-v1",
+      entryKind: "tool", name: toolName, toolName, status: "active", annotations,
+      riskLevel, isReadOnly: riskLevel === "read", isWrite: riskLevel !== "read", versionHash: "broker-integration-v1",
       inputSchema: { type: "object", properties: { owner: { type: "string" }, repo: { type: "string" } } },
     });
     const calls: unknown[] = [];
@@ -272,10 +275,60 @@ if (!support.supported) console.warn(`Skipping ACC-4308 GitHub broker integratio
     const gateway = createToolGatewayService(db, { remoteHttpRequest, toolActionSigningSecret: "github-broker-integration-test-only" });
     const session = await gateway.createSession(input);
     const tool = (await gateway.listToolsForSession(session.token))
-      .find(candidate => candidate.connectionId === selected.connectionId && candidate.upstreamToolName === "create_branch");
+      .find(candidate => candidate.connectionId === selected.connectionId && candidate.upstreamToolName === toolName);
     expect(tool).toBeDefined();
-    return { input, selected, gateway, session, tool: tool!, calls };
+    const execute = (parameters: Record<string, unknown>) => gateway.executeTool({
+      sessionToken: session.token, tool: tool!.name, parameters, idempotencyKey: randomUUID() });
+    return { input, selected, gateway, session, tool: tool!, calls, remoteHttpRequest, execute };
   }
+
+  // Without a reviewed GitHub classifier these mutations are stored as `read`,
+  // and provider annotations can claim the same. Neither may skip the broker.
+  const readStoredMutations = ["merge_pull_request", "fork_repository", "push_files", "add_issue_comment"];
+  const misleadingAnnotations = [{}, { readOnlyHint: true, destructiveHint: false, openWorldHint: false }];
+
+  it.each(readStoredMutations.flatMap(toolName => misleadingAnnotations.map(annotations => [toolName, annotations] as const)))(
+    "refuses read-stored mutation %s (annotations %j) outside its bound before provider I/O",
+    async (toolName, annotations) => {
+      const f = await gatewayFixture({ toolName, riskLevel: "read", annotations });
+      await expect(f.execute({ owner: pairs[0].owner, repo: pairs[1].repo }))
+        .rejects.toMatchObject({ status: 403, message: expect.stringContaining("explicit allow for this owner and repository") });
+      await expect(f.execute({ repo: pairs[0].repo }))
+        .rejects.toMatchObject({ status: 403, message: expect.stringContaining("exact owner and repository") });
+      // The broad profile admitted both calls; only the dispatch broker refused them.
+      expect(await db.select().from(toolInvocations).where(eq(toolInvocations.companyId, f.input.companyId)))
+        .toMatchObject([{ policyDecision: "allow", status: "failed" }, { policyDecision: "allow", status: "failed" }]);
+      expect(f.remoteHttpRequest).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(readStoredMutations)("refuses read-stored mutation %s when the grant has no resolved identity", async (toolName) => {
+    const f = await gatewayFixture({ toolName, riskLevel: "read", annotations: { readOnlyHint: true } });
+    await db.update(connectionGrants).set({ providerTenant: null }).where(eq(connectionGrants.id, f.selected.id));
+    await expect(f.execute(pairs[0]))
+      .rejects.toMatchObject({ status: 403, message: expect.stringContaining("no resolved managed identity") });
+    expect(f.remoteHttpRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(readStoredMutations)("dispatches read-stored mutation %s for its explicit exact pair only", async (toolName) => {
+    const f = await gatewayFixture({ toolName, riskLevel: "read", annotations: { readOnlyHint: true } });
+    expect((await f.execute(pairs[0])).status).toBe("completed");
+    expect(f.calls).toEqual([pairs[0]]);
+  });
+
+  it("keeps unbounded consumers of a read-stored mutation on their existing contract", async () => {
+    const f = await gatewayFixture({ toolName: "merge_pull_request", riskLevel: "read", bounded: false });
+    const anyPair = { owner: pairs[0].owner, repo: pairs[1].repo };
+    expect((await f.execute(anyPair)).status).toBe("completed");
+    expect(f.calls).toEqual([anyPair]);
+  });
+
+  it("leaves reviewed GitHub reads to the general policy layer", async () => {
+    const f = await gatewayFixture({ toolName: "get_file_contents", riskLevel: "read" });
+    const outside = { owner: pairs[0].owner, repo: pairs[1].repo };
+    expect((await f.execute(outside)).status).toBe("completed");
+    expect(f.calls).toEqual([outside]);
+  });
 
   it("dispatches an exact pair through the real gateway to a synthetic MCP provider", async () => {
     const f = await gatewayFixture();
