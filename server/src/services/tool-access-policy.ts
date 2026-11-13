@@ -1942,6 +1942,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         gatewayId: null,
         applicationId: invocation.applicationId,
         connectionId: invocation.connectionId,
+        isGitHubConnection: false, // Historical selector matching does not evaluate policy ordering.
         catalogEntryId: invocation.catalogEntryId,
         catalogStatus: null,
         catalogVersionHash: invocation.catalogVersionHash,
