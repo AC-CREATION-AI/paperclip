@@ -48,6 +48,7 @@ const reviewedPolicies: ReviewedToolPolicy[] = [
     classifyRisk: tool => provider.risk(tool.name),
     matchesConnection: provider.isConnection,
   })),
+  { sourceTemplateKey: "github", quarantineNewEntries: true },
   { sourceTemplateKey: "enterpret", quarantineNewEntries: true, classifyRisk: enterpretRisk },
   { sourceTemplateKey: "braintrust", quarantineNewEntries: true, classifyRisk: braintrustRisk },
 ];

@@ -22,9 +22,17 @@ Agent access: [companion](../agent-access-map/app-permissions.md).
 
 Changing the connection's agent list preserves profile assignments for agents
 that remain installed. Saving the list must not restore a removed app-profile
-assignment. New installations retain the current app-profile defaults.
-Non-empty saves also remove legacy connection-wide include rules, including
-unchanged lists and removals with no new targets.
+assignment. New on-demand MCP installations grant transport reach without binding
+the full app profile. Other new installations retain the app-profile defaults.
+An explicit `bindAppProfile: false` removes only the selected target's app binding
+in the installation transaction. A surviving company-wide app binding prevents
+an agent-only transport transition. Non-empty saves also remove legacy
+connection-wide include rules, including unchanged lists and removals with no
+new targets. GitHub catalog discovery quarantines new or changed definitions,
+including draft discovery and safe-default reads; reviewed unchanged actions
+retain their state. GitHub create/reconnect keeps `quarantineNewEntries: true`;
+credential rotation does not approve pending actions. `bindAppProfile: false`
+is the supported transport-only request; no application code writes `onDemandTools`.
 
 ## How to get to it (user POV)
 
@@ -57,6 +65,13 @@ that adding, removing, or retaining agents preserves removed app-profile grants
 and denies write tools for agents with read-only profiles. They also check
 company installations, new-agent defaults, legacy connection-wide include
 cleanup, and access-extension audit records.
+[Transport-only tests](../../server/src/__tests__/github-transport-only-installs.test.ts)
+add the 50-tool exposure regression, seven unchanged consumers, authorization of
+explicit unbinding, rollback after backend termination, and idempotent replay.
+[GitHub quarantine tests](../../server/src/__tests__/github-catalog-quarantine.test.ts)
+cover draft discovery, changed definitions and reviewed entries. The
+[bounded-access guide](../../doc/github-consultant-bounded-access.md) documents
+the isolated policy bank and the raw-credential export restriction.
 These fixtures do not qualify an agent-authenticated request or a live provider.
 
 [Runtime assignment tests](../../server/src/__tests__/agent-runtime-assignments.test.ts)

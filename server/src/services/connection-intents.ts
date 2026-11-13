@@ -1227,10 +1227,14 @@ export function connectionIntentService(db: Db) {
         selectedConnection.id,
         loaded.issue.companyId,
       );
-      const requestedInstall = { targetType: "agent" as const, targetId: payload.requestingAgentId };
+      const requestedInstall = {
+        targetType: "agent" as const, targetId: payload.requestingAgentId,
+        ...(payload.accessRequest ? { bindAppProfile: false as const } : {}),
+      };
       const additiveInstalls = installs.some((install) =>
         install.targetType === requestedInstall.targetType && install.targetId === requestedInstall.targetId
-      ) ? installs : [...installs, requestedInstall];
+      ) ? installs.map(install => install.targetType === requestedInstall.targetType && install.targetId === requestedInstall.targetId
+        ? requestedInstall : install) : [...installs, requestedInstall];
       await txAccess.putConnectionInstalls(selectedConnection.id, { installs: additiveInstalls }, {
         actorType: "user",
         actorId: userId,

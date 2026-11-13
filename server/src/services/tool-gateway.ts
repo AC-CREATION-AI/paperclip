@@ -39,6 +39,7 @@ import { executeSpekoVoiceTool, spekoToolsForSession } from "./voice/speko-agent
 import { captureRunIdentity } from "./run-identity.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { assertBoundedGitHubMutation, isBoundedGitHubMutationCandidate } from "./git-broker.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import { logger } from "../middleware/logger.js";
 import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
@@ -6173,6 +6174,24 @@ export function createToolGatewayService(
     };
   }
 
+  // Every GitHub tool not reviewed as read, whatever its stored risk or provider
+  // annotations, is rechecked against the bounded broker before provider I/O.
+  async function assertBoundedGitHubDispatch(
+    session: ToolGatewaySession,
+    tool: ToolGatewayDescriptor,
+    entry: { toolName: string; riskLevel: string | null },
+    connection: typeof toolConnections.$inferSelect,
+    grant: typeof connectionGrants.$inferSelect,
+    parameters: unknown,
+  ) {
+    if (!session.agentId || !isBoundedGitHubMutationCandidate(entry.toolName, entry.riskLevel)
+      || (connection.config.sourceTemplateKey !== "github" && connection.transportConfig?.sourceTemplateKey !== "github")) return;
+    await assertBoundedGitHubMutation(db, {
+      companyId: session.companyId, agentId: session.agentId, connectionId: connection.id, grant,
+      decisionInput: policyInputForTool({ session, tool, parameters, consumeRateLimit: false }),
+    });
+  }
+
   async function executeRemoteHttpTool(
     session: ToolGatewaySession,
     tool: ToolGatewayDescriptor,
@@ -6195,6 +6214,7 @@ export function createToolGatewayService(
       ms = railwayCommandBudgetMs(parameters);
     }
     const grant = await resolveConnectionGrant(session, connection);
+    await assertBoundedGitHubDispatch(session, tool, entry, connection, grant, parameters);
     const restConnector = restConnectorFor(connection);
     if (restConnector) {
       const budgetMs = Math.min(ms, 30_000);
@@ -6677,6 +6697,7 @@ export function createToolGatewayService(
       tool,
     );
     const grant = await resolveConnectionGrant(session, connection);
+    await assertBoundedGitHubDispatch(session, tool, entry, connection, grant, parameters);
     const template = await resolveLocalStdioRuntimeTemplate(connection);
     const env = await localStdioEnvironment(
       session,

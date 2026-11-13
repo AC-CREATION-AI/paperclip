@@ -46,6 +46,7 @@ import type {
   ToolRiskLevel,
 } from "@paperclipai/shared";
 import { toolPolicyConditionsSchema } from "@paperclipai/shared";
+import { isBoundedGitHubPolicy } from "./github-policy-scope.js";
 import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
 import {
   effectiveToolProfileBindings,
@@ -72,6 +73,7 @@ type ToolAccessContext = {
   gatewayId: string | null;
   applicationId: string | null;
   connectionId: string | null;
+  isGitHubConnection: boolean;
   catalogEntryId: string | null;
   catalogStatus: string | null;
   catalogVersionHash: string | null;
@@ -1085,6 +1087,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     let upstreamToolName = typeof input.request.upstreamToolName === "string" ? input.request.upstreamToolName : null;
     let riskLevel = asToolRiskLevel(input.request.riskLevel);
     let connectionTransport: string | null = null;
+    let isGitHubConnection = false;
     let applicationType: string | null = null;
 
     if (catalogEntryId) {
@@ -1127,6 +1130,8 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
             enabled: toolConnections.enabled,
             status: toolConnections.status,
             transport: toolConnections.transport,
+            isGitHubConnection: sql<boolean>`coalesce(${toolConnections.config}->>'sourceTemplateKey' = 'github', false)
+              or coalesce(${toolConnections.transportConfig}->>'sourceTemplateKey' = 'github', false)`,
           })
           .from(toolConnections)
           .where(eq(toolConnections.id, contextConnectionId)));
@@ -1138,6 +1143,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       }
       applicationId = connection.applicationId;
       connectionTransport = connection.transport;
+      isGitHubConnection = connection.isGitHubConnection;
     }
     if (applicationId) {
       const contextApplicationId = applicationId;
@@ -1185,6 +1191,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         gatewayId,
         applicationId,
         connectionId,
+        isGitHubConnection,
         catalogEntryId,
         catalogStatus,
         catalogVersionHash,
@@ -1564,6 +1571,12 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
     const matchingPolicies = policies
       .map((policy) => ({ policy, conditionEvaluation: evaluatePolicyConditions(policyConditions(policy), ctx) }))
       .filter(({ policy, conditionEvaluation }) => selectorMatches(policy.selectors, ctx) && conditionEvaluation.matched);
+    // Only bounded GitHub opts into deny-first. Other consumers retain numeric
+    // priority, including argumentless discovery before missing-command blocks.
+    if (ctx.isGitHubConnection && ctx.actorType === "agent" && ctx.agentId && ctx.connectionId
+      && policies.some(policy => isBoundedGitHubPolicy(policy, ctx.agentId!, ctx.connectionId!))) {
+      matchingPolicies.sort((a, b) => Number(b.policy.policyType === "block") - Number(a.policy.policyType === "block"));
+    }
     const explicitBlock = matchingPolicies.find(({ policy }) => policy.policyType === "block");
     for (const { policy, conditionEvaluation } of matchingPolicies) {
       const policyExplanation = {
@@ -1929,6 +1942,7 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
         gatewayId: null,
         applicationId: invocation.applicationId,
         connectionId: invocation.connectionId,
+        isGitHubConnection: false, // Historical selector matching does not evaluate policy ordering.
         catalogEntryId: invocation.catalogEntryId,
         catalogStatus: null,
         catalogVersionHash: invocation.catalogVersionHash,

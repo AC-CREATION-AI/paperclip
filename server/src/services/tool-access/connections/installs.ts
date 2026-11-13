@@ -179,6 +179,12 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
       }> = [];
       await db.transaction(async (tx) => {
         await lockToolConnectionRuntimeInputs(tx, connection.companyId, connection.id);
+        const [lockedConnection] = await tx.select({ transport: toolConnections.transport, config: toolConnections.config })
+          .from(toolConnections).where(and(eq(toolConnections.companyId, connection.companyId), eq(toolConnections.id, connection.id)));
+        const onDemand = lockedConnection.transport === "mcp_remote"
+          && [lockedConnection.config.onDemandTools, lockedConnection.config.loadToolsOnDemand].some(
+            (value) => value === true || (typeof value === "object" && value !== null && "enabled" in value && value.enabled === true),
+          );
         if (markMcpAccessConfigured) {
           // Preserve an explicit zero-agent selection through OAuth. Merge the
           // marker in SQL so concurrent credential/config changes are retained.
@@ -205,7 +211,7 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
             (install) => `${install.targetType}:${install.targetId}`,
           ),
         );
-        const bindings = await tx.select({ targetType: toolProfileBindings.targetType, targetId: toolProfileBindings.targetId })
+        const bindings = await tx.select({ profileId: toolProfileBindings.profileId, targetType: toolProfileBindings.targetType, targetId: toolProfileBindings.targetId })
           .from(toolProfileBindings).innerJoin(toolProfiles, eq(toolProfiles.id, toolProfileBindings.profileId))
           .where(and(eq(toolProfileBindings.companyId, connection.companyId), eq(toolProfiles.companyId, connection.companyId), eq(toolProfiles.profileKey, `app:${connection.id}`)));
         await lockToolAssignmentAgents(tx, connection.companyId, [...existing, ...requested.values(), ...bindings]);
@@ -259,6 +265,32 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
         const additions = [...requested.entries()]
           .filter(([key]) => !existingKeys.has(key))
           .map(([, install]) => install);
+        const removedAppBindings: Array<{ targetType: string; targetId: string }> = [];
+        const companyBindings = await tx.select({ id: toolProfileBindings.id })
+          .from(toolProfileBindings).innerJoin(toolProfiles, eq(toolProfiles.id, toolProfileBindings.profileId))
+          .where(and(eq(toolProfileBindings.companyId, connection.companyId), eq(toolProfiles.companyId, connection.companyId),
+            eq(toolProfiles.profileKey, `app:${connection.id}`), eq(toolProfileBindings.targetType, "company"),
+            eq(toolProfileBindings.targetId, connection.companyId))).limit(1);
+        const companyBindingRemains = companyBindings.length > 0
+          && requested.get(`company:${connection.companyId}`)?.bindAppProfile !== false;
+        if (companyBindingRemains && [...requested].some(([key, install]) => install.targetType === "agent"
+          && (install.bindAppProfile === false || (onDemand && !existingKeys.has(key))))) {
+          throw unprocessable("Transport-only agent access cannot inherit a company-wide app profile; remove that broader binding first");
+        }
+        // Transport-only targets must not retain a stale app binding when reach
+        // is added. Existing installs change only on explicit selection.
+        for (const [key, install] of requested) {
+          if (install.bindAppProfile !== false && !(onDemand && !existingKeys.has(key))) continue;
+          const binding = bindings.find((candidate) => candidate.targetType === install.targetType && candidate.targetId === install.targetId);
+          if (!binding) continue;
+          const removed = await tx.delete(toolProfileBindings).where(and(
+            eq(toolProfileBindings.companyId, connection.companyId),
+            eq(toolProfileBindings.profileId, binding.profileId),
+            eq(toolProfileBindings.targetType, install.targetType),
+            eq(toolProfileBindings.targetId, install.targetId),
+          )).returning({ targetType: toolProfileBindings.targetType, targetId: toolProfileBindings.targetId });
+          removedAppBindings.push(...removed);
+        }
         if (additions.length > 0) {
           await tx.insert(toolConnectionInstalls).values(
             additions.map((install) => ({
@@ -276,6 +308,7 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
         if (requested.size > 0 && connection.connectionPurpose !== "ai") {
           const profile = await appProfileForConnection(tx, connection);
           for (const install of additions) {
+            if (onDemand || install.bindAppProfile === false) continue;
             const [binding] = await tx
               .insert(toolProfileBindings)
               .values({
@@ -303,7 +336,7 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
               });
           }
         }
-        if (markMcpAccessConfigured || removeIds.length > 0 || additions.length > 0) {
+        if (markMcpAccessConfigured || removeIds.length > 0 || additions.length > 0 || removedAppBindings.length > 0) {
           const binding = actorBinding(actor);
           await tx.insert(toolAccessAuditEvents).values({
             companyId: connection.companyId,
@@ -315,6 +348,7 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
             reasonCode: "installs_changed",
             details: {
               ...(markMcpAccessConfigured ? { mcpAgentAccessConfigured: true } : {}),
+              ...(removedAppBindings.length > 0 ? { unboundAppProfiles: removedAppBindings } : {}),
               added: additions.map((install) => ({
                 targetType: install.targetType,
                 targetId: install.targetId,

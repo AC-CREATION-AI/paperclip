@@ -17281,7 +17281,7 @@ describeEmbeddedPostgres("tool access service", () => {
       enabled: false,
       config: expect.objectContaining({
         sourceTemplateKey: "github",
-        quarantineNewEntries: false,
+        quarantineNewEntries: true,
       }),
       credentialSecretRefs: [
         expect.objectContaining({
@@ -17307,13 +17307,13 @@ describeEmbeddedPostgres("tool access service", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: listEntry.id,
-          status: "active",
-          quarantineReason: null,
+          status: "quarantined",
+          quarantineReason: "pending_review",
         }),
         expect.objectContaining({
           id: updateEntry.id,
-          status: "active",
-          quarantineReason: null,
+          status: "quarantined",
+          quarantineReason: "pending_review",
         }),
       ]),
     );
@@ -17322,6 +17322,7 @@ describeEmbeddedPostgres("tool access service", () => {
       connect.connectionId,
       {
         enabledCatalogEntryIds: [listEntry.id, updateEntry.id],
+        reviewedCatalogEntryIds: [listEntry.id, updateEntry.id],
         askFirstCatalogEntryIds: [updateEntry.id],
         access: { agentIds: [agent.id] },
       },
@@ -18135,6 +18136,7 @@ describeEmbeddedPostgres("tool access service", () => {
       connect.connectionId,
       {
         enabledCatalogEntryIds: [listEntry.id, updateEntry.id],
+        reviewedCatalogEntryIds: [listEntry.id, updateEntry.id],
         askFirstCatalogEntryIds: [updateEntry.id],
         access: "all_agents",
       },
@@ -18212,9 +18214,9 @@ describeEmbeddedPostgres("tool access service", () => {
       before.credentialSecretRefs.length,
     );
     expect(afterRef.secretId).toBe(beforeRef.secretId);
-    expect(after.config).toMatchObject({ quarantineNewEntries: false });
+    expect(after.config).toMatchObject({ quarantineNewEntries: true });
     expect(after.transportConfig).toMatchObject({
-      quarantineNewEntries: false,
+      quarantineNewEntries: true,
     });
 
     const catalogAfterReconnect = await db
@@ -18225,17 +18227,18 @@ describeEmbeddedPostgres("tool access service", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: listEntry.id,
-          status: "active",
-          quarantineReason: null,
+          status: "quarantined",
+          quarantineReason: "pending_review",
         }),
         expect.objectContaining({
           id: updateEntry.id,
-          status: "active",
-          quarantineReason: null,
+          status: "quarantined",
+          quarantineReason: "pending_review",
         }),
         expect.objectContaining({
           toolName: "delete_zap",
-          status: "active",
+          status: "quarantined",
+          quarantineReason: "pending_review",
           riskLevel: "destructive",
         }),
       ]),
@@ -18247,22 +18250,9 @@ describeEmbeddedPostgres("tool access service", () => {
       .select()
       .from(toolProfileEntries)
       .where(eq(toolProfileEntries.profileId, finished.profile.id));
-    expect(profileEntriesAfterReconnect).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          catalogEntryId: listEntry.id,
-          effect: "include",
-        }),
-        expect.objectContaining({
-          catalogEntryId: updateEntry.id,
-          effect: "include",
-        }),
-        expect.objectContaining({
-          catalogEntryId: deleteEntry.id,
-          effect: "include",
-        }),
-      ]),
-    );
+    // Reconnect does not silently approve old pending entries or new actions.
+    expect(profileEntriesAfterReconnect).toEqual([]);
+    expect(deleteEntry.status).toBe("quarantined");
     const policiesAfterReconnect = await db
       .select()
       .from(toolPolicies)
@@ -18272,8 +18262,7 @@ describeEmbeddedPostgres("tool access service", () => {
           eq(toolPolicies.enabled, true),
         ),
       );
-    // Reconnect preserves explicit policy choices, but newly discovered
-    // actions start Allowed just like actions from a fresh connection.
+    // Reconnect preserves explicit policy choices without granting new actions.
     expect(policiesAfterReconnect).toHaveLength(1);
     expect(policiesAfterReconnect).toEqual([
       expect.objectContaining({

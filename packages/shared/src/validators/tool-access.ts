@@ -272,6 +272,7 @@ export const putToolConnectionInstallsSchema = z.object({
   installs: z.array(z.object({
     targetType: toolConnectionInstallTargetTypeSchema,
     targetId: z.string().trim().min(1).max(200),
+    bindAppProfile: z.literal(false).optional(),
   })).max(1000),
 }).strict();
 

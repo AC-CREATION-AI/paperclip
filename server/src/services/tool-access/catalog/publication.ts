@@ -184,11 +184,12 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
     const connectorPolicy = connectorToolPolicy(sourceTemplateKey, connection);
     const preserveReviewedCatalog = connectorPolicy.quarantineNewEntries && existingRows.length > 0;
     const quarantineOnRefresh =
-      (!refreshOptions.enableAllByDefault || preserveReviewedCatalog) &&
+      (sourceTemplateKey === "github" || !refreshOptions.enableAllByDefault || preserveReviewedCatalog) &&
       shouldQuarantineNewEntries(connection) &&
       (connection.status === "active" ||
         preserveReviewedCatalog ||
         sourceTemplateKey === "posthog" ||
+        sourceTemplateKey === "github" ||
         refreshOptions.quarantineManagedOAuthDraft === true);
     const safeDefault = asRecord(connection.config).safeDefault === true;
     for (const descriptor of descriptors) {
@@ -203,7 +204,7 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
         quarantineOnRefresh &&
         (!existing || changed) &&
         existing?.status !== "disabled" &&
-        (!safeDefault || riskLevel !== "read" || nativeProvider);
+        (sourceTemplateKey === "github" || !safeDefault || riskLevel !== "read" || nativeProvider);
       const providerPermanentlyBlocked = Boolean(
         googleProfile &&
         !isGoogleWorkspaceToolAllowed(googleProfile, descriptor),

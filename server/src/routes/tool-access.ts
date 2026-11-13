@@ -1951,11 +1951,11 @@ function connectorEnrollmentPrincipal(req: Request): string {
           eq(toolConnectionInstalls.companyId, connection.companyId),
           eq(toolConnectionInstalls.connectionId, connection.id),
         ));
-      const requestedInstalls = req.body.installs as Array<{ targetType: "company" | "agent"; targetId: string }>;
+      const requestedInstalls = req.body.installs as Array<{ targetType: "company" | "agent"; targetId: string; bindAppProfile?: false }>;
       const requestedKeys = new Set(requestedInstalls.map((install) => `${install.targetType}:${install.targetId}`));
       const existingKeys = new Set(existingInstalls.map((install) => `${install.targetType}:${install.targetId}`));
       const changedInstalls = [
-        ...requestedInstalls.filter((install) => !existingKeys.has(`${install.targetType}:${install.targetId}`)),
+        ...requestedInstalls.filter((install) => install.bindAppProfile === false || !existingKeys.has(`${install.targetType}:${install.targetId}`)),
         ...existingInstalls.filter((install) => !requestedKeys.has(`${install.targetType}:${install.targetId}`)),
       ];
       if (changedInstalls.some((install) => install.targetType === "company")) {

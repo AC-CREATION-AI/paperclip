@@ -94,10 +94,16 @@ Gaps: This individual operation has source review but no recorded HTTP verificat
 API: `present` — `PUT /api/tool-connections/{connectionId}/installs`; JSON REST.
 Agent access: `available` — agent REST and default native `search_api` / `call_api`.
 Policy: `tools:manage_profiles` and `tools:manage_connections`; [shared management policy](../../doc/plans/2026-10-13-connection-api-parity.md#authorization-contract). Resolved resources and every affected target are checked; personal ownership remains the responsible user.
-Only new installation targets receive the app-profile binding. Existing targets
-retain their saved profile assignments, including deliberately removed grants.
+Only new non-on-demand targets receive the default app-profile binding.
+On-demand MCP additions are transport-only. Existing targets retain their saved
+profile assignments unless `bindAppProfile: false` explicitly selects atomic
+unbinding; authorization applies even when the install target is unchanged.
+An agent transport-only transition refuses a surviving company-wide app binding.
 Non-empty saves still remove legacy connection-wide include entries from the
-managed app profile when no new targets are added.
+managed app profile when no new targets are added. The
+[transport-only regressions](../../server/src/__tests__/github-transport-only-installs.test.ts)
+cover operator HTTP, PostgreSQL rollback after backend termination, and replay;
+they do not establish agent-authenticated or live-provider qualification.
 Evidence: `source-only` — [route](../../server/src/routes/tool-access.ts); reviewed in the working tree based on the source commit above.
 Verification: `not-run` — individual agent-authenticated operation not executed in this audit; shared authorization and representative family flows are exercised by the authenticated integration suite. [Installation permission regressions](../../server/src/__tests__/tool-connection-installs.test.ts) exercise operator HTTP requests, persisted assignments, tool-policy decisions, and access-extension audit records with PostgreSQL. Those fixtures do not qualify agent authentication. Follow the route schema, inspect persistence/audit, and assert owner, scope and revoked-authority denial.
 Gaps: This individual operation has source review but no recorded HTTP verification. Provider availability and live setup remain unqualified.
@@ -198,6 +204,11 @@ Review: `operation-reviewed`.
 API: `present` — `POST /api/tool-connections/{connectionId}/catalog/refresh`; JSON REST.
 Agent access: `available` — agent REST and default native `search_api` / `call_api`.
 Policy: `tools:manage_connections`; [shared management policy](../../doc/plans/2026-10-13-connection-api-parity.md#authorization-contract). Resolved resources and every affected target are checked; personal ownership remains the responsible user.
+GitHub new and changed definitions remain quarantined even during draft discovery,
+with enable-all or safe-default reads. Unchanged reviewed entries retain their
+state. Creation/reconnect keeps `quarantineNewEntries: true`; explicit review IDs
+are required to approve pending entries at finish. [Quarantine regressions](../../server/src/__tests__/github-catalog-quarantine.test.ts)
+use isolated PostgreSQL and synthetic discovery, not live-provider credentials.
 Evidence: `source-only` — [route](../../server/src/routes/tool-access.ts); reviewed in the working tree based on the source commit above.
 Verification: `not-run` — individual operation not executed in this audit; shared authorization and representative family flows are exercised by the authenticated integration suite. Follow the route schema, inspect persistence/audit, and assert owner, scope and revoked-authority denial.
 Gaps: This individual operation has source review but no recorded HTTP verification. Provider availability and live setup remain unqualified.
