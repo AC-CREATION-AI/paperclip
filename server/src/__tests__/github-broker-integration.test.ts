@@ -234,8 +234,9 @@ if (!support.supported) console.warn(`Skipping ACC-4308 GitHub broker integratio
     await expect(mutation(input, selected, pairs[0])).resolves.toBeUndefined();
     await db.update(connectionGrants).set({ status: "revoked", revokedAt: new Date() }).where(eq(connectionGrants.id, selected.id));
     vi.clearAllMocks();
-    expect(await credential(input)).toMatchObject({ configured: true, error: "The managed GitHub identity must be reconnected" });
-    expect((await credential(input)).credential).toBeUndefined();
+    const revoked = await credential(input);
+    expect(revoked).toMatchObject({ configured: true, error: "The managed GitHub identity must be reconnected" });
+    expect(revoked.credential).toBeUndefined();
     expect(await toolAccessPolicyService(db).decide(decisionInput(input, selected, pairs[0]))).toMatchObject({ allowed: true, reasonCode: "allow_policy" });
     await expect(mutation(input, selected, pairs[0])).rejects.toMatchObject({ status: 403, message: expect.stringContaining("no resolved managed identity") });
     expectNoVaultRead();
