@@ -45,6 +45,24 @@ export function hasBoardOrgAccess(req: Request) {
   return Array.isArray(req.actor.companyIds) && req.actor.companyIds.length > 0;
 }
 
+/**
+ * Raw run and workspace-operation output (ACC-3241, ACC-3423) is restricted to
+ * the run's own agent identity and to board principals of the company.
+ * Callers check the resource's visibility first (404), then this gate (403).
+ * Output without a run (`agentId: null`) is board-only.
+ */
+export function canActorReadRunOutput(req: Request, owner: { companyId: string; agentId?: string | null }) {
+  if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return true;
+  if (req.actor.type === "agent") {
+    return Boolean(req.actor.companyId === owner.companyId
+      && req.actor.agentId && owner.agentId && req.actor.agentId === owner.agentId);
+  }
+  if (req.actor.type === "board") {
+    return hasBoardOrgAccess(req) && Boolean(req.actor.companyIds?.includes(owner.companyId));
+  }
+  return false;
+}
+
 export function assertBoardOrgAccess(req: Request) {
   assertBoard(req);
   if (hasBoardOrgAccess(req)) {

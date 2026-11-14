@@ -46,6 +46,7 @@ const mockRunSecretRedactionRegistry = vi.hoisted(() => ({
     async (_companyId: string, _runId: string, value: unknown) => value,
   ),
   redactRunLog: vi.fn(async (_companyId: string, _run: unknown, value: unknown) => value),
+  redactWorkspaceOperationOutput: vi.fn(async (_companyId: string, values: unknown[], _acl: unknown) => values),
 }));
 
 const mockProviderTraceStore = vi.hoisted(() => ({
@@ -682,6 +683,55 @@ describe("agent live run routes", () => {
     } else {
       expect(mockWorkspaceOperationService.readLog).not.toHaveBeenCalled();
     }
+  });
+
+  it("keeps existing but invisible workspace logs at 404 without reading the log", async () => {
+    mockWorkspaceOperationService.getById.mockResolvedValue({
+      id: "operation-1", companyId: "company-1", heartbeatRunId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    const query = { from: vi.fn().mockReturnThis(), where: vi.fn().mockReturnThis(),
+      limit: vi.fn(async () => []) }; // source run is invisible/missing
+    const actor = { type: "agent", companyId: "company-1", agentId: "other-agent", source: "agent_key" };
+    const res = await requestApp(await createApp({ select: () => query }, actor), url => request(url).get("/api/workspace-operations/operation-1/log"));
+    expect(res.status).toBe(404);
+    expect(mockWorkspaceOperationService.readLog).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.getRunLogAccess).not.toHaveBeenCalled();
+  });
+
+  it.each(["agent-1", null])("makes a visible operation without a run board-only (%s)", async (agentId) => {
+    mockWorkspaceOperationService.getById.mockResolvedValue({
+      id: "operation-1", companyId: "company-1", heartbeatRunId: null,
+      issueId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    });
+    mockWorkspaceOperationService.readLog.mockResolvedValue({ content: "old output" });
+    const query = { from: vi.fn().mockReturnThis(), where: vi.fn().mockReturnThis(),
+      then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve([{ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }]).then(resolve) };
+    const actor = agentId
+      ? { type: "agent", companyId: "company-1", agentId, source: "agent_key" }
+      : { type: "board", companyIds: ["company-1"], userId: "operator-1", source: "session", isInstanceAdmin: false };
+    const res = await requestApp(await createApp({ select: () => query }, actor), url => request(url).get("/api/workspace-operations/operation-1/log"));
+    expect(res.status).toBe(agentId ? 403 : 200);
+    expect(mockHeartbeatService.getRunLogAccess).not.toHaveBeenCalled();
+    if (agentId) expect(mockWorkspaceOperationService.readLog).not.toHaveBeenCalled();
+  });
+
+  it.each(["agent-1", "other-agent", null])("passes historical operation excerpts through the read redactor and log ACL (%s)", async (agentId) => {
+    const operation = { id: "operation-1", companyId: "company-1",
+      heartbeatRunId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", stdoutExcerpt: "historical opaque value" };
+    mockWorkspaceOperationService.listForRun.mockResolvedValue([operation]);
+    const query = { from: vi.fn().mockReturnThis(), where: vi.fn().mockReturnThis(),
+      limit: vi.fn(async () => [{ companyId: "company-1", scopeKind: "company", issueId: null }]) };
+    const actor = agentId
+      ? { type: "agent", companyId: "company-1", agentId, source: "agent_key" }
+      : { type: "board", companyIds: ["company-1"], userId: "operator-1", source: "session", isInstanceAdmin: false };
+    const res = await requestApp(await createApp({ select: () => query }, actor), url => request(url)
+      .get("/api/heartbeat-runs/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/workspace-operations"));
+    expect(res.status).toBe(200);
+    expect(mockRunSecretRedactionRegistry.redactWorkspaceOperationOutput).toHaveBeenCalledWith("company-1", [operation], expect.any(Function));
+    const acl = mockRunSecretRedactionRegistry.redactWorkspaceOperationOutput.mock.calls[0][2] as (owner: unknown) => boolean;
+    expect(acl({ companyId: "company-1", agentId: "agent-1" })).toBe(agentId !== "other-agent");
+    expect(acl({ companyId: "company-1", agentId: null })).toBe(agentId === null);
+    expect(mockWorkspaceOperationService.readLog).not.toHaveBeenCalled();
   });
 
   it("keeps invisible workspace logs at 404 before the log ACL", async () => {

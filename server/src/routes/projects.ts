@@ -36,7 +36,8 @@ import { accessService, projectService, logActivity, workspaceOperationService }
 import { conflict, forbidden, unprocessable } from "../errors.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, canActorReadRunOutput, getAccessibleResource, getActorInfo } from "./authz.js";
+import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import { ensureProjectAccessMember } from "../services/projects.js";
 import {
   buildWorkspaceRuntimeDesiredStatePatch,
@@ -81,6 +82,7 @@ export function projectRoutes(db: Db) {
   const access = accessService(db);
   const secretsSvc = secretService(db);
   const workspaceOperations = workspaceOperationService(db);
+  const runRedactions = createRunSecretRedactionRegistry(db);
   const instanceSettings = instanceSettingsService(db);
   const externalObjectsSvc = externalObjectService(db, {
     enabled: async () => (await instanceSettings.getExperimental()).enableExternalObjects === true,
@@ -1012,9 +1014,11 @@ export function projectRoutes(db: Db) {
       },
     });
 
+    const [safeOperation] = await runRedactions.redactWorkspaceOperationOutput(project.companyId, [operation],
+      (owner) => canActorReadRunOutput(req, owner));
     res.json({
       workspace: updatedWorkspace,
-      operation,
+      operation: safeOperation,
     });
   }
 

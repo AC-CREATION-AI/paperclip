@@ -270,6 +270,30 @@ export function createRunSecretRedactionRegistry(db: Db) {
     return fingerprints;
   }
 
+  /** The read passes of a run log, bound to one run (ACC-3241). */
+  async function runLogRedactor(
+    companyId: string,
+    run: { id: string; agentId?: string | null },
+    knownFingerprints?: ReadonlySet<string>,
+  ): Promise<(text: string) => string> {
+    const [disclosure, boundValues, fingerprints] = await Promise.all([
+      valuesForRun(companyId, run.id, null),
+      secretService(db).resolveSecretValuesForRunRedaction(companyId, {
+        agentId: run.agentId ?? null,
+        runId: run.id,
+      }),
+      knownFingerprints ?? companySecretFingerprints(companyId),
+    ]);
+    const values = [...new Set([...disclosure.values, ...boundValues])]
+      .sort((left, right) => right.length - left.length);
+    const partialIndex = partialSecretIndex(values);
+    const redact = (text: string) => redactSecretFamilyPatterns(redactFingerprintMatchesInText(
+      redactPartialMatchesInText(redactText(text, values), partialIndex),
+      fingerprints,
+    ));
+    return (text: string) => redactRunLogContent(text, redact);
+  }
+
   return {
     redactionValuesForRun: async (companyId: string, runId: string) => valuesForRuns(await db
       .select({ contextSnapshot: registrySnapshot }).from(heartbeatRuns)
@@ -342,22 +366,72 @@ export function createRunSecretRedactionRegistry(db: Db) {
       run: { id: string; agentId?: string | null },
       value: T,
     ): Promise<T> => {
-      const [disclosure, boundValues, fingerprints] = await Promise.all([
-        valuesForRun(companyId, run.id, null),
-        secretService(db).resolveSecretValuesForRunRedaction(companyId, {
-          agentId: run.agentId ?? null,
-          runId: run.id,
-        }),
+      const redact = await runLogRedactor(companyId, run);
+      return mapRedactableStrings(value, redact);
+    },
+    /**
+     * Workspace operation excerpts (ACC-3423): `stdoutExcerpt` /
+     * `stderrExcerpt` are a slice of the operation log, so every response that
+     * returns an operation serves them through the same read passes as the
+     * log. Rows written before the write-side pass (history) are covered too.
+     * - Operation with a run: the run's registered and bound values,
+     *   fragments, fingerprints and families (exactly `redactRunLog`).
+     * - Operation without a run, or whose run is gone: no run-scoped value is
+     *   known, so the conservative pass is every stored company secret
+     *   version by fingerprint plus the families.
+     * - `canReadOutput` is the log ACL: an actor who may see the operation but
+     *   not its log gets `null` excerpts instead of a masked slice of it.
+     */
+    redactWorkspaceOperationOutput: async <T extends {
+      companyId: string;
+      heartbeatRunId?: string | null;
+      stdoutExcerpt?: string | null;
+      stderrExcerpt?: string | null;
+    }>(
+      companyId: string,
+      operations: T[],
+      canReadOutput: (owner: { companyId: string; agentId: string | null }) => boolean | Promise<boolean>,
+    ): Promise<T[]> => {
+      const withOutput = operations.filter((operation) => operation.stdoutExcerpt || operation.stderrExcerpt);
+      if (withOutput.length === 0) return operations;
+      const runIds = [...new Set(withOutput.flatMap((operation) =>
+        operation.heartbeatRunId ? [operation.heartbeatRunId] : []))];
+      const [runs, fingerprints] = await Promise.all([
+        runIds.length === 0 ? Promise.resolve([] as Array<{ id: string; agentId: string | null }>) : db
+          .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId })
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.id, runIds))),
         companySecretFingerprints(companyId),
       ]);
-      const values = [...new Set([...disclosure.values, ...boundValues])]
-        .sort((left, right) => right.length - left.length);
-      const partialIndex = partialSecretIndex(values);
-      const redact = (text: string) => redactSecretFamilyPatterns(redactFingerprintMatchesInText(
-        redactPartialMatchesInText(redactText(text, values), partialIndex),
-        fingerprints,
-      ));
-      return mapRedactableStrings(value, (text) => redactRunLogContent(text, redact));
+      const runById = new Map(runs.map((run) => [run.id, run]));
+      const redactors = new Map<string, Promise<(text: string) => string>>();
+      const redactorFor = (run: { id: string; agentId: string | null } | undefined) => {
+        const key = run?.id ?? "";
+        let redactor = redactors.get(key);
+        if (!redactor) {
+          redactor = run
+            ? runLogRedactor(companyId, run, fingerprints)
+            : Promise.resolve((text: string) => redactRunLogContent(
+              text,
+              (plain) => redactSecretFamilyPatterns(redactFingerprintMatchesInText(plain, fingerprints)),
+            ));
+          redactors.set(key, redactor);
+        }
+        return redactor;
+      };
+      return Promise.all(operations.map(async (operation) => {
+        if (!operation.stdoutExcerpt && !operation.stderrExcerpt) return operation;
+        const run = operation.heartbeatRunId ? runById.get(operation.heartbeatRunId) : undefined;
+        const allowed = operation.companyId === companyId
+          && await canReadOutput({ companyId: operation.companyId, agentId: run?.agentId ?? null });
+        if (!allowed) return { ...operation, stdoutExcerpt: null, stderrExcerpt: null };
+        const redact = await redactorFor(run);
+        return {
+          ...operation,
+          stdoutExcerpt: operation.stdoutExcerpt ? redact(operation.stdoutExcerpt) : operation.stdoutExcerpt,
+          stderrExcerpt: operation.stderrExcerpt ? redact(operation.stderrExcerpt) : operation.stderrExcerpt,
+        };
+      }));
     },
     redactForIssue: async <T>(companyId: string, issueId: string, value: T): Promise<T> =>
       redactRegisteredSecretValues(value, await valuesForIssue(companyId, issueId)),

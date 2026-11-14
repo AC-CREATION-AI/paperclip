@@ -135,7 +135,7 @@ import {
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PAPERCLIP_CORE_SKILL_KEYS } from "../services/company-skills.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
-import { assertAuthenticated, assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasBoardOrgAccess, hasCompanyAccess } from "./authz.js";
+import { assertAuthenticated, assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, canActorReadRunOutput, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
 import { isLoginCommandSupportedAdapterType } from "../services/login-command.js";
 import {
@@ -832,19 +832,8 @@ export function agentRoutes(
    * the company. The run's visibility check still runs first, so a run the
    * actor cannot see at all keeps answering 404; this gate answers 403.
    */
-  async function canActorReadRunLog(req: Request, run: { companyId: string; agentId?: string | null }) {
-    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return true;
-    if (req.actor.type === "agent") {
-      return Boolean(req.actor.agentId && run.agentId && req.actor.agentId === run.agentId);
-    }
-    if (req.actor.type === "board") {
-      return hasBoardOrgAccess(req) && Boolean(req.actor.companyIds?.includes(run.companyId));
-    }
-    return false;
-  }
-
   async function assertRunLogReadAllowed(req: Request, res: Response, run: { companyId: string; agentId?: string | null }) {
-    if (await canActorReadRunLog(req, run)) return true;
+    if (canActorReadRunOutput(req, run)) return true;
     res.status(403).json({ error: "Run log is restricted to the run's agent and board operators" });
     return false;
   }
@@ -7733,7 +7722,13 @@ export function agentRoutes(
     for (const operation of operations) {
       if (await canActorReadWorkspaceOperation(db, access, req.actor, operation)) visibleOperations.push(operation);
     }
-    res.json(redactCurrentUserValue(visibleOperations, await getCurrentUserRedactionOptions()));
+    // Excerpts are a slice of each operation's log (ACC-3423): same log ACL and
+    // read passes as /workspace-operations/:id/log.
+    res.json(redactCurrentUserValue(
+      await runRedactions.redactWorkspaceOperationOutput(run.companyId, visibleOperations,
+        (owner) => canActorReadRunOutput(req, owner)),
+      await getCurrentUserRedactionOptions(),
+    ));
   });
 
   router.get("/workspace-operations/:operationId/log", async (req, res) => {
