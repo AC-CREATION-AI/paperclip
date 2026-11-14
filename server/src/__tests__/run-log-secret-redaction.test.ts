@@ -24,6 +24,8 @@ function fixture(input: {
   versionRows?: Array<{ fingerprintSha256?: string | null; valueSha256?: string | null }>;
 }) {
   const runRows = [{
+    id: "run-1",
+    agentId: "agent-1",
     contextSnapshot: {
       paperclipSecretRedactions: (input.registryEntries ?? []).map((entry) => ({
         fingerprintSha256: sha256(entry.value),
@@ -47,6 +49,57 @@ function fixture(input: {
     run: { id: "run-1", agentId: "agent-1" },
   };
 }
+
+describe("workspace operation excerpts at read time (ACC-3423, B rework)", () => {
+  const companyId = "company-1";
+  const operation = { id: "historical-operation", companyId, heartbeatRunId: "run-1",
+    stdoutExcerpt: "historical opaque-disclosure-value", stderrExcerpt: "opaque-disclosure-value" };
+
+  it("masks historical excerpts using the run registry, not only family patterns", async () => {
+    const { registry } = fixture({ registryEntries: [{ value: "opaque-disclosure-value" }] });
+    const [out] = await registry.redactWorkspaceOperationOutput(companyId, [operation], () => true);
+    expect(out.stdoutExcerpt).toBe(`historical ${REDACTED_EVENT_VALUE}`);
+    expect(out.stderrExcerpt).toBe(REDACTED_EVENT_VALUE);
+    expect(operation.stdoutExcerpt).toContain("opaque-disclosure-value"); // no mutation of stored history
+  });
+
+  it("uses bound values and fragments on both excerpts", async () => {
+    const value = "opaque-bound-value-with-enough-characters-for-fragments";
+    resolveBoundValues.mockResolvedValueOnce([value]);
+    const { registry } = fixture({});
+    const [out] = await registry.redactWorkspaceOperationOutput(companyId,
+      [{ ...operation, stdoutExcerpt: value, stderrExcerpt: value.slice(0, 30) }], () => true);
+    expect(out.stdoutExcerpt).toBe(REDACTED_EVENT_VALUE);
+    expect(out.stderrExcerpt).not.toContain(value.slice(0, 30));
+  });
+
+  it("withholds output from a visible non-owner instead of exposing a masked log slice", async () => {
+    const { registry } = fixture({});
+    const acl = vi.fn(({ agentId }) => agentId === "other-agent");
+    const [out] = await registry.redactWorkspaceOperationOutput(companyId, [operation], acl);
+    expect(acl).toHaveBeenCalledWith({ companyId, agentId: "agent-1" });
+    expect(out).toEqual({ ...operation, stdoutExcerpt: null, stderrExcerpt: null });
+  });
+
+  it.each([null, "missing-run"])("masks orphan/no-run history by company fingerprint (%s)", async (heartbeatRunId) => {
+    const value = "7f3ab19c-4e5d-6a7b-8c9d-0e1f2a3b4c5d";
+    const { registry } = fixture({ versionRows: [{ fingerprintSha256: sha256(value) }] });
+    const acl = vi.fn(() => true);
+    const [out] = await registry.redactWorkspaceOperationOutput(companyId,
+      [{ ...operation, heartbeatRunId, stdoutExcerpt: value, stderrExcerpt: value }], acl);
+    expect(acl).toHaveBeenCalledWith({ companyId, agentId: null });
+    expect(out.stdoutExcerpt).toBe(REDACTED_EVENT_VALUE);
+    expect(out.stderrExcerpt).toBe(REDACTED_EVENT_VALUE);
+  });
+
+  it("never reveals cross-company output even to an otherwise authorized caller", async () => {
+    const { registry } = fixture({});
+    const [out] = await registry.redactWorkspaceOperationOutput(companyId,
+      [{ ...operation, companyId: "other-company" }], () => true);
+    expect(out.stdoutExcerpt).toBeNull();
+    expect(out.stderrExcerpt).toBeNull();
+  });
+});
 
 describe("run log secret redaction (ACC-3241)", () => {
   it("masks registered disclosure values in served log chunks", async () => {

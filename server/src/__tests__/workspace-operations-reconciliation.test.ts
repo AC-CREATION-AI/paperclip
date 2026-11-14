@@ -208,6 +208,35 @@ describeEmbeddedPostgres("workspace operation reconciliation", () => {
     expect(unrelated?.status).toBe("running");
   });
 
+  it("masks secret families and nested ACP content before storing workspace logs and excerpts", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Workspace log privacy",
+      issuePrefix: `S${companyId.replace(/-/g, "").slice(0, 7).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    const secret = `sk-${"syntheticOnly".repeat(5)}`;
+    const nested = JSON.stringify({ type: "tool_result", content: JSON.stringify({ text: secret }) });
+    const service = workspaceOperationService(db);
+    const operation = await service.createRecorder({ companyId }).recordOperation({
+      phase: "worktree_prepare",
+      run: async report => {
+        await report({ system: `progress ${secret}` });
+        return { status: "succeeded", stdout: `done ${secret}`, stderr: nested };
+      },
+    });
+    const persisted = await service.getById(operation.id);
+    const log = await service.readLog(operation.id);
+    expect(log.content).not.toContain(secret);
+    expect(log.content).toContain("REDACTED");
+    expect(log.content).toContain("progress");
+    expect(persisted?.stdoutExcerpt).toContain("done");
+    expect(persisted?.stdoutExcerpt).not.toContain(secret);
+    expect(persisted?.stderrExcerpt).not.toContain(secret);
+    expect(persisted?.stdoutExcerpt).toContain("REDACTED");
+    expect(persisted?.stderrExcerpt).toContain("REDACTED");
+  });
+
   it("persists bounded repair phase progress on the operation row and log", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();

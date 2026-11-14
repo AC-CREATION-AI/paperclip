@@ -46,7 +46,8 @@ import {
   startRuntimeServicesForWorkspaceControl,
   stopRuntimeServicesForExecutionWorkspace,
 } from "../services/workspace-runtime.js";
-import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, canActorReadRunOutput, getAccessibleResource, getActorInfo } from "./authz.js";
+import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import { logger } from "../middleware/logger.js";
 import {
   assertNoAgentHostWorkspaceCommandMutation,
@@ -91,6 +92,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
   const svc = executionWorkspaceService(db, { pluginWorkerManager: opts.pluginWorkerManager });
   const access = accessService(db);
   const workspaceOperationsSvc = workspaceOperationService(db);
+  const runRedactions = createRunSecretRedactionRegistry(db);
   const runtimeLeases = workspaceRuntimeLeaseService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
@@ -280,7 +282,10 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
     for (const operation of operations) {
       if (await canActorReadWorkspaceOperation(db, access, req.actor, operation)) visibleOperations.push(operation);
     }
-    res.json(visibleOperations);
+    // Excerpts are a slice of each operation's log (ACC-3423): same log ACL and
+    // read passes as /workspace-operations/:id/log, history included.
+    res.json(await runRedactions.redactWorkspaceOperationOutput(workspace.companyId, visibleOperations,
+      (owner) => canActorReadRunOutput(req, owner)));
   });
 
   async function handleExecutionWorkspaceRuntimeCommand(req: Request, res: Response) {
@@ -1057,9 +1062,11 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
       },
     });
 
+    const [safeOperation] = await runRedactions.redactWorkspaceOperationOutput(existing.companyId, [operation],
+      (owner) => canActorReadRunOutput(req, owner));
     res.json({
       workspace,
-      operation,
+      operation: safeOperation,
     });
   }
 
