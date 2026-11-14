@@ -4,6 +4,7 @@ import {
   parseClaudeStreamJson,
   detectClaudeLoginRequired,
   extractClaudeRetryNotBefore,
+  isClaudeGatewayRateLimitError,
   isClaudeProviderQuotaError,
   isClaudeTransientUpstreamError,
   isClaudePoisonedPreviousMessageIdError,
@@ -489,6 +490,82 @@ describe("extractClaudeRetryNotBefore", () => {
     expect(
       extractClaudeRetryNotBefore({ errorMessage: "Overloaded. Try again later." }, new Date()),
     ).toBeNull();
+  });
+
+  it.each([
+    ["reset after 4m 28s", "2026-11-12T17:47:28.000Z"],
+    ["reset after 10m", "2026-11-12T17:53:00.000Z"],
+    ["reset after 1h 26m 15s", "2026-11-12T19:09:15.000Z"],
+    ["reset after 45s", "2026-11-12T17:43:45.000Z"],
+  ])("parses the OmniRoute 429 countdown '%s' with a 30 s margin", (reset, expected) => {
+    // Message read on the 12/11 runs that failed on the OmniRoute pre-dispatch filters (ACC-4351).
+    const now = new Date("2026-11-12T17:42:30.000Z");
+    const errorMessage = "ACP agent reported a terminal limit failure.\nAPI Error: Request rejected (429) · " +
+      `Service temporarily unavailable: all targets were skipped by pre-dispatch filters ${reset}`;
+    expect(extractClaudeRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(expected);
+  });
+
+  it("ignores a countdown with no rate-limit signal on its line", () => {
+    expect(
+      extractClaudeRetryNotBefore({ errorMessage: "The cache will reset after 5m of inactivity." }, new Date()),
+    ).toBeNull();
+  });
+
+  it("ignores a countdown that sits on another line than the limit signal", () => {
+    // The limit signal is on the first line; the countdown sits on the second
+    // line, which carries no limit signal of its own. The countdown belongs
+    // to another subject and must not delay the retry.
+    const now = new Date("2026-11-12T17:42:30.000Z");
+    const errorMessage = [
+      "ACP agent reported a terminal limit failure.",
+      "API Error: Request rejected (429) · Service temporarily unavailable",
+      "the window closes reset after 4m 28s",
+    ].join("\n");
+    expect(extractClaudeRetryNotBefore({ errorMessage }, now)).toBeNull();
+  });
+
+  it("never reads a countdown from the agent's own stdout", () => {
+    // The stdout is the transcript: it also carries what the agent wrote. An
+    // agent that mentions another tenant's quota must not delay the retry.
+    const now = new Date("2026-11-12T17:42:30.000Z");
+    expect(extractClaudeRetryNotBefore({
+      stdout: "the other tenant's quota resets after 1h",
+      stderr: "HTTP 529",
+      errorMessage: "Claude exited with code 1: HTTP 529",
+    }, now)).toBeNull();
+    expect(extractClaudeRetryNotBefore({
+      stdout: "upstream 429 reset after 45m",
+      stderr: "Internal Server Error 500",
+      errorMessage: "Claude exited with code 1: Internal Server Error 500",
+    }, now)).toBeNull();
+  });
+
+  it("still reads a provider countdown from stderr", () => {
+    const now = new Date("2026-11-12T17:42:30.000Z");
+    expect(extractClaudeRetryNotBefore({
+      stdout: "",
+      stderr: "Request rejected (429) · pre-dispatch filters reset after 4m 28s",
+    }, now)?.toISOString()).toBe("2026-11-12T17:47:28.000Z");
+  });
+});
+
+describe("isClaudeGatewayRateLimitError", () => {
+  it("recognizes the OmniRoute pre-dispatch 429 and leaves generic rate-limit wording out", () => {
+    expect(isClaudeGatewayRateLimitError({
+      errorMessage: "API Error: Request rejected (429) · Service temporarily unavailable: all targets were skipped by pre-dispatch filters reset after 4m 28s",
+    })).toBe(true);
+    expect(isClaudeGatewayRateLimitError({ errorMessage: "Rate limit exceeded; retry later" })).toBe(false);
+    expect(isClaudeGatewayRateLimitError({ errorMessage: "Context window limit exceeded" })).toBe(false);
+  });
+
+  it("ignores a gateway signal that only the agent's stdout carries", () => {
+    // The agent's own output is not a provider signal: it must not turn a run
+    // into a rate-window retry.
+    expect(isClaudeGatewayRateLimitError({
+      stdout: "the other tenant's quota resets after 1h",
+      stderr: "HTTP 529",
+      errorMessage: "Claude exited with code 1: HTTP 529",
+    })).toBe(false);
   });
 });
 

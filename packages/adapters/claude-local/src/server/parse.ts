@@ -6,6 +6,7 @@ import {
   parseObject,
   parseJson,
 } from "@paperclipai/adapter-utils/server-utils";
+import { readGatewayRateLimitWindow } from "@paperclipai/adapter-utils/gateway-rate-limit-window";
 
 // The legacy login-prompt markers. The Claude CLI prints these words when it
 // asks the user to log in. The detector matches them against any probe output
@@ -28,6 +29,8 @@ const CLAUDE_MODEL_NOT_FOUND_RE =
   /(?:\b404\b[\s\S]{0,120})?(?:model[\s_-]*(?:not[\s_-]*found|does not exist|unknown|invalid)|unknown[\s_-]*model)/i;
 const CLAUDE_EXTRA_USAGE_RESET_RE =
   /(?:you(?:'|’)ve\s+hit\s+your\s+(?:\w+\s+)?limit|session\s+limit\s+(?:reached|exceeded)|out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
+
+const CLAUDE_GATEWAY_RATE_LIMIT_RE = /(?:\b429\b|all\s+targets\s+were\s+skipped\s+by\s+pre-dispatch\s+filters)/i;
 
 /**
  * Sum the per-model usage ledger from a Claude CLI result event. The result
@@ -401,6 +404,37 @@ function buildClaudeTransientHaystack(input: {
     .join("\n");
 }
 
+/**
+ * The provider surfaces only: the error message, the parsed provider result
+ * and the process stderr.
+ *
+ * The agent's own stdout is deliberately left out. stdout carries the
+ * transcript, so it also carries whatever the agent wrote: an agent that
+ * mentions "the other tenant's quota resets after 1h" would otherwise push
+ * the retry an hour out. stderr is the provider's channel and stays in.
+ */
+function buildClaudeProviderHaystack(input: {
+  parsed?: Record<string, unknown> | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  errorMessage?: string | null;
+}): string {
+  const parsed = input.parsed ?? null;
+  const resultText = parsed ? asString(parsed.result, "") : "";
+  const parsedErrors = parsed ? extractClaudeErrorMessages(parsed) : [];
+  return [
+    input.errorMessage ?? "",
+    resultText,
+    ...parsedErrors,
+    input.stderr ?? "",
+  ]
+    .join("\n")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
 function readTimeZoneParts(date: Date, timeZone: string) {
   const values = new Map(
     new Intl.DateTimeFormat("en-US", {
@@ -543,10 +577,30 @@ export function extractClaudeRetryNotBefore(
   },
   now = new Date(),
 ): Date | null {
-  const haystack = buildClaudeTransientHaystack(input);
+  // Provider surfaces only: the agent's own stdout must never decide when the
+  // retry happens (see buildClaudeProviderHaystack).
+  const haystack = buildClaudeProviderHaystack(input);
   const match = haystack.match(CLAUDE_EXTRA_USAGE_RESET_RE);
-  if (!match) return null;
-  return parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
+  if (match) return parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
+  return readGatewayRateLimitWindow(haystack, now);
+}
+
+/**
+ * A gateway 429 (OmniRoute: "all targets were skipped by pre-dispatch
+ * filters") is a rate window, not an account quota. Generic "rate limit"
+ * wording stays out: a typed `limit` also covers context, turn and budget.
+ *
+ * Only provider surfaces carry the signal. The agent's own output (stdout)
+ * is excluded: an agent that writes "the other tenant's quota resets after
+ * 1h" must not push the retry an hour out.
+ */
+export function isClaudeGatewayRateLimitError(input: {
+  parsed?: Record<string, unknown> | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  errorMessage?: string | null;
+}): boolean {
+  return CLAUDE_GATEWAY_RATE_LIMIT_RE.test(buildClaudeProviderHaystack(input));
 }
 
 export function isClaudeTransientUpstreamError(input: {

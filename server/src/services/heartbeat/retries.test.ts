@@ -65,6 +65,78 @@ function deferral() {
   });
 }
 
+describe("transient recovery contract (ACC-4351)", () => {
+  const finishedAt = new Date("2026-11-12T17:42:30.000Z");
+
+  it("reads the persisted family written by the adapter", () => {
+    // The OmniRoute plugin adapter writes errorFamily into resultJson. The
+    // server reads it back instead of re-deriving it from the error code.
+    expect(extracted.readHeartbeatRunErrorFamily({
+      errorCode: "omniroute_transient_upstream",
+      resultJson: { errorFamily: "transient_upstream" },
+    })).toBe("transient_upstream");
+    expect(extracted.readHeartbeatRunErrorFamily({
+      errorCode: "omniroute_provider_quota",
+      resultJson: { errorFamily: "provider_quota" },
+    })).toBe("provider_quota");
+  });
+
+  it("does not derive a family from an adapter-specific error code", () => {
+    // Only the server's own codes carry a family. An adapter code that the
+    // server does not know must stay unclassified rather than be guessed.
+    expect(extracted.readHeartbeatRunErrorFamily({
+      errorCode: "omniroute_transient_upstream",
+      resultJson: null,
+    })).toBeNull();
+  });
+
+  it("reads the OmniRoute countdown from the run error when no retryNotBefore was persisted", () => {
+    expect(extracted.readTransientRecoveryContractFromRun({
+      errorCode: "claude_transient_upstream",
+      resultJson: { errorFamily: "transient_upstream" },
+      error: "OmniRoute /v1/chat/completions a répondu 429 : Service temporarily unavailable: all targets were skipped by pre-dispatch filters (gemini-4-argon-high 100% conn:5bdd8e8d) reset after 1h 26m 15s",
+      finishedAt,
+    })).toEqual({
+      errorFamily: "transient_upstream",
+      retryNotBefore: new Date("2026-11-12T19:09:15.000Z"),
+    });
+  });
+
+  it("keeps a persisted retryNotBefore over the message countdown", () => {
+    expect(extracted.readTransientRecoveryContractFromRun({
+      errorCode: "claude_transient_upstream",
+      resultJson: { retryNotBefore: "2026-11-12T18:00:00.000Z" },
+      error: "Request rejected (429) · reset after 4m 28s",
+      finishedAt,
+    })?.retryNotBefore?.toISOString()).toBe("2026-11-12T18:00:00.000Z");
+  });
+
+  it("does not open a transient contract for an unclassified failure that mentions a reset", () => {
+    expect(extracted.readTransientRecoveryContractFromRun({
+      errorCode: "acpx_turn_failed",
+      resultJson: null,
+      error: "Request rejected (429) · reset after 4m 28s",
+      finishedAt,
+    })).toBeNull();
+  });
+
+  it("ignores a countdown without a rate-limit signal", () => {
+    expect(extracted.parseRelativeResetAfter("cache reset after 5m", finishedAt)).toBeNull();
+    expect(extracted.parseRelativeResetAfter("429 · reset after soon", finishedAt)).toBeNull();
+  });
+
+  it("ignores a countdown that sits on another line than the limit signal", () => {
+    // The limit signal is on the first line; the countdown sits on the second
+    // line, which carries no limit signal of its own. It belongs to another
+    // subject: it must not push the retry.
+    const error = [
+      "Request rejected (429) · Service temporarily unavailable",
+      "the window closes reset after 9m 47s",
+    ].join("\n");
+    expect(extracted.parseRelativeResetAfter(error, finishedAt)).toBeNull();
+  });
+});
+
 describe("heartbeat retry module callbacks", () => {
   it("preserves legacy helper and error-class identity", () => {
     expect(legacy.computeBoundedTransientHeartbeatRetrySchedule).toBe(extracted.computeBoundedTransientHeartbeatRetrySchedule);
