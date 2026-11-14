@@ -7,9 +7,12 @@ import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 
 // These adapters accept a conversation turn. Retrying a process or webhook can
 // replay the action itself, so those adapters retain their recovery contract.
+// omniroute_native runs in-process (no PID): its execution authority ends when
+// the server-side execution control settles or the server boot that owned it
+// ends, so a terminal row carries no live provider (ACC-4454).
 export const CONVERSATION_ADAPTER_TYPES = [
   "claude_local", "codex_local", "cursor", "gemini_local", "opencode_local",
-  "pi_local", "grok_local", "kimi_local", "hermes_local",
+  "pi_local", "grok_local", "kimi_local", "hermes_local", "omniroute_native",
 ] as const;
 
 export function isConversationAdapter(adapterType: string): boolean {
