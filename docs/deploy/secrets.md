@@ -519,3 +519,98 @@ Agent environment variables use secret references:
 ```
 
 The server resolves and decrypts these at runtime, injecting the real value into the agent process environment.
+
+## Run Log Redaction And Access
+
+Run logs carry tool output verbatim, so they are the most likely place for a
+secret value to surface after resolution. Two server-side controls apply to
+`GET /api/heartbeat-runs/:id/log`:
+
+- **Redaction at read time.** Before a log page is served, the server masks
+  the registered disclosure values of the run, the values of every secret
+  version bound to the run's agent (env injection, agent access, run secret
+  manifest), fragments of at least 24 characters of those values (truncated
+  debug dumps, `KEY=<prefix>`), any value matched by the sha256 fingerprint
+  of a stored version of a company secret (rotated and revoked versions
+  included), and the secret family patterns (provider-prefixed tokens such as
+  `sk-`, `ghp_`, `github_pat_`, `pcp_`, PEM `BEGIN ... PRIVATE KEY` blocks,
+  `user:pass@` credential URLs, credential-shaped `Bearer`/`Basic`/`Token`
+  values, and JWTs). Masking is by value shape, not by header or variable
+  name. The log is NDJSON: redaction runs on the decoded text of each
+  record's string fields, records cut by the page window included, and the
+  served records stay valid JSON. Nested JSON is decoded too, up to three
+  levels inside each chunk: an ACP chunk (`claude_local` with `engine: acp`)
+  is itself an `acpx.*` event whose `text` holds the tool output, escaped a
+  second time; a hub MCP tool called through `run_tool` wraps that output in
+  the gateway envelope (`{"content":[{"type":"text","text":...}]}`); and the
+  output may print JSON of its own (an escaped string value of pretty-printed
+  JSON is decoded as well). A literal the runtime cut is decoded too: the ACP
+  runtime truncates every tool summary at 500 characters
+  (`TOOL_OUTPUT_SUMMARY_MAX_CHARS`), so a hub MCP tool output stored through
+  `run_tool` ends on a string literal with no closing quote as soon as it
+  exceeds ~477 characters. Such a cut literal is treated as a complete one,
+  so the material it carries is masked on write and on read (two residuals of
+  the cut itself remain open, see *Open defects* below). A quote in prose
+  that does not open a JSON value is left alone.
+- **Redaction at write time.** Chunks are stored after the generic
+  sensitive-text pass and the same family patterns, applied to the raw chunk
+  and again to its decoded nested JSON, so a PEM block or a family token in
+  ACP tool output is not stored in clear. The write path does not know the
+  run's secret values: those are masked when the log is served. Family
+  patterns apply to run logs only; agent comments and other prose keep the
+  generic pass.
+- **Not covered.** A PEM key flattened onto one line (`echo $KEY` without
+  quotes), or printed as a Python `repr` (single quotes, escaped `\n`), is
+  masked only when its value is bound to the run or its agent. The
+  values of a deleted secret are no longer masked: deletion removes its
+  stored versions and their fingerprints.
+- **Open defects (truncation residuals).** Two residuals of the 500-character
+  cut itself are known and **not fixed**. They are open defects, not closed
+  limitations:
+  - **T2 (medium): a secret that straddles the cut keeps a clear prefix.**
+    When the cut lands inside a secret, only a prefix of it survives in the
+    stored summary (10 to 30 characters measured), and a PEM body cut before
+    its block footer stays readable line by line (6 of 6 lines measured). No
+    masking pass can remove what the runtime never wrote. The durable fix is
+    to log the full tool output (or at least its fingerprint) instead of the
+    truncated summary; until then, treat any tool output past ~477
+    characters as potentially carrying a clear secret prefix.
+  - **T1 (low): the cut-literal path can consume the opening quote of prose
+    that is not JSON.** When a quote follows a structural character and the
+    text contains an escape (for example `key: "value with \"escape`), the
+    line is treated as a cut literal even though it is prose, and its opening
+    quote is dropped. The visible text is otherwise preserved byte for byte,
+    the served record stays valid JSON, and redaction is idempotent. Common
+    forms (Windows paths, URLs, sentences with a closing quote) are not
+    affected.
+- **Access control.** The log route answers only to the run's own agent
+  identity and to board principals (operators, instance admins). Any other
+  agent of the company receives `403`. A run the caller cannot see at all
+  keeps answering `404`.
+
+### Never Display Secret Values
+
+Never print, paste, or log the `value` field of a secret. When a workflow
+needs to prove which secret was involved, output only its length or its
+`sha256` truncated to 12 characters. Command wrappers follow the same rule:
+a `curl .../value` call must never end up in a stdout. The server-side
+redaction above is a backstop, not a license to display values.
+
+### Shared Runner User (No Per-Agent Filesystem Isolation)
+
+On the current deployments every agent runs under the same OS user (uid 999,
+`pcagent`) with a shared home directory. Consequences:
+
+- file permissions do **not** isolate agents from each other: a `0600` (or
+  `000`) file written by one agent can be re-read by any other agent running
+  under the same uid;
+- `chattr` is unavailable in the containers, so no immutable flag can be
+  raised against a peer of the same uid.
+
+Rule: **do not write secrets or secret archives to the shared home directory
+or `/tmp`** while the uid is shared. Keep secret material in the company
+secret store, and treat any plaintext landing on the runner filesystem as
+already disclosed. If per-agent isolation is ever introduced (uid per agent
+or container per run), verify with two distinct identities that a `0600` file
+written by one agent is no longer readable by another.
+

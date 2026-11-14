@@ -1009,6 +1009,42 @@ export function redactAgentAdapterConfig(
   return { ...(redactEventPayload(rest) ?? {}), env: redactedEnv };
 }
 
+/**
+ * Secret family patterns (ACC-3241), shared with the adapter-side redactors.
+ * They cover material whose shape betrays it even when no known value and no
+ * secret-named field is present: PEM private key blocks (including truncated
+ * ones), provider-prefixed keys, credential URLs, authorization headers and
+ * JWTs. Masking is by value shape, never by header or variable name (C7): the
+ * same token is masked under `X-Paperclip-Api-Key`, `X-Board-Key` or any other
+ * label. They apply to run logs only (`redactRunLogText`), not to agent prose:
+ * an authorization scheme is masked only when followed by a credential-shaped
+ * value (a digit or base64 symbol), so "Token authentication-required" stays.
+ */
+const PEM_PRIVATE_KEY_BLOCK_RE =
+  /-----BEGIN ([A-Z0-9 ]*?)PRIVATE KEY-----(?:(?:\r?\n(?:[A-Za-z0-9+/=]{6,}|\*\*\*REDACTED\*\*\*))(?=\r?\n|$))*(?:\r?\n-----END \1PRIVATE KEY-----)?/g;
+const SECRET_FAMILY_TOKEN_RE =
+  /(?<![A-Za-z0-9_-])(?:sk-(?:ant-|or-v1-|proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|pcp_[A-Za-z0-9_.=-]{12,})/g;
+const JWT_TOKEN_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+const CREDENTIAL_URL_RE = /\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s:/@'"`]*):([^\s@/'"`]+)@/g;
+const FAMILY_AUTHORIZATION_RE = /\b(Bearer|Basic|Token)(\s+)(?=[A-Za-z._~-]*[0-9+/=])([A-Za-z0-9._~+/=-]{16,})/g;
+
+export function redactSecretFamilyPatterns(input: string): string {
+  return input
+    .replace(PEM_PRIVATE_KEY_BLOCK_RE, (match, kind: string) => {
+      // A lone header carries no key material; rewriting it would insert a
+      // raw newline into JSON-escaped text.
+      if (match === `-----BEGIN ${kind}PRIVATE KEY-----`) return match;
+      const footer = match.includes("-----END ")
+        ? `\n-----END ${kind}PRIVATE KEY-----`
+        : "";
+      return `-----BEGIN ${kind}PRIVATE KEY-----\n${REDACTED_EVENT_VALUE}${footer}`;
+    })
+    .replace(FAMILY_AUTHORIZATION_RE, (_match, scheme: string, space: string) => `${scheme}${space}${REDACTED_EVENT_VALUE}`)
+    .replace(CREDENTIAL_URL_RE, (_match, scheme: string, user: string) => `${scheme}${user}:${REDACTED_EVENT_VALUE}@`)
+    .replace(SECRET_FAMILY_TOKEN_RE, REDACTED_EVENT_VALUE)
+    .replace(JWT_TOKEN_RE, REDACTED_EVENT_VALUE);
+}
+
 export function redactSensitiveText(input: string): string {
   if (!maybeContainsSecretText(input)) return input;
   return redactCommandText(
@@ -1020,4 +1056,189 @@ export function redactSensitiveText(input: string): string {
       ),
     REDACTED_EVENT_VALUE,
   );
+}
+
+/** Run-log text redaction: the generic sensitive-text pass plus the secret family patterns. */
+export function redactRunLogText(input: string): string {
+  return redactSecretFamilyPatterns(redactSensitiveText(input));
+}
+
+/**
+ * Decode a JSON string body, redact the decoded text and re-encode it. A body
+ * the redaction leaves unchanged keeps its original bytes. A body cut by the
+ * page window may end inside an escape sequence; that tail is kept raw.
+ */
+function redactJsonStringBody(body: string, redact: (text: string) => string): string {
+  for (let cut = body.length; cut >= Math.max(0, body.length - 6); cut -= 1) {
+    let decoded: string;
+    try {
+      decoded = JSON.parse(`"${body.slice(0, cut)}"`) as string;
+    } catch {
+      continue;
+    }
+    const redacted = redact(decoded);
+    return redacted === decoded ? body : `${JSON.stringify(redacted).slice(1, -1)}${body.slice(cut)}`;
+  }
+  return redact(body);
+}
+
+/** Redact every string literal of a (possibly cut) JSON record line. */
+function redactJsonRecordLine(line: string, startsInString: boolean, redact: (text: string) => string): string {
+  let out = "";
+  let cursor = 0;
+  let inString = startsInString;
+  while (cursor < line.length) {
+    if (!inString) {
+      const quote = line.indexOf("\"", cursor);
+      if (quote === -1) return out + line.slice(cursor);
+      out += line.slice(cursor, quote + 1);
+      cursor = quote + 1;
+      inString = true;
+      continue;
+    }
+    let end = cursor;
+    while (end < line.length && line[end] !== "\"") end += line[end] === "\\" ? 2 : 1;
+    end = Math.min(end, line.length);
+    out += redactJsonStringBody(line.slice(cursor, end), redact);
+    if (end < line.length) out += "\"";
+    cursor = end + 1;
+    inString = false;
+  }
+  return out;
+}
+
+/** A page that starts mid-record begins inside a string literal: `…text","seq":3}`. */
+function startsInsideJsonString(line: string) {
+  for (let index = 0; index < line.length; index += 1) {
+    if (line[index] === "\\") {
+      index += 1;
+    } else if (line[index] === "\"") {
+      return /^(?:,"|:|\})/.test(line.slice(index + 1));
+    }
+  }
+  return false;
+}
+
+// Levels of JSON nesting walked inside a stored chunk: the ACP event it
+// carries (`acpx.tool_call` and its `text`), the MCP gateway envelope of a
+// `run_tool` result, then JSON printed by the tool itself. A served log page
+// adds one level for the record that wraps each chunk. Deeper material only
+// gets the plain-text passes.
+const MAX_NESTED_CHUNK_DEPTH = 3;
+const ESCAPED_JSON_STRING_LITERAL_RE = /"((?:[^"\\\n]|\\.)*)"/g;
+
+/**
+ * Whether the quote at `index` opens a JSON value: it follows a structural
+ * character, whitespace aside. A stray quote in prose does not.
+ */
+function opensJsonValue(text: string, index: number): boolean {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const character = text[cursor]!;
+    if (/\s/.test(character)) continue;
+    return /[{[,:]/.test(character);
+  }
+  return false;
+}
+
+/** Whether the quote at `index` is escaped by the backslashes before it. */
+function isEscapedQuote(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) backslashes += 1;
+  return backslashes % 2 === 1;
+}
+
+/**
+ * A JSON string literal cut by the runtime has no closing quote: the rest of
+ * the text is its body. The ACP runtime truncates every tool summary at 500
+ * characters (`TOOL_OUTPUT_SUMMARY_MAX_CHARS` in acpx/dist/runtime.js, both
+ * pinned versions), so a hub MCP tool output stored through `run_tool` ends
+ * on a cut literal as soon as it exceeds ~477 characters. Such a literal is
+ * not matched by `ESCAPED_JSON_STRING_LITERAL_RE`, so the nested passes never
+ * reached the material it carried and the secret stayed in clear.
+ *
+ * The cut literal is the last unescaped quote of the text: every quote before
+ * it is closed, so it has no partner left. Two signals keep prose out of it:
+ * the body must carry escapes, and the quote must open a JSON value. A stray
+ * quote in a log line is left alone.
+ */
+function truncatedJsonStringLiteral(text: string): { start: number; body: string } | null {
+  for (let quote = text.lastIndexOf("\""); quote !== -1; quote = text.lastIndexOf("\"", quote - 1)) {
+    if (isEscapedQuote(text, quote)) continue;
+    const body = text.slice(quote + 1);
+    if (!body.includes("\\") || !opensJsonValue(text, quote)) return null;
+    return { start: quote, body };
+  }
+  return null;
+}
+
+/**
+ * Redact the decoded text of JSON string literals that carry escapes
+ * (pretty-printed JSON, quoted dumps). A literal the runtime cut keeps its
+ * escapes decoded, so the material it carries is masked as well. The cut
+ * literal keeps its original shape: no closing quote is added, so a record
+ * the redaction leaves unchanged keeps its bytes.
+ */
+function redactEscapedJsonStringLiterals(text: string, redact: (text: string) => string): string {
+  if (!text.includes("\\")) return text;
+  const cut = truncatedJsonStringLiteral(text);
+  const head = cut ? text.slice(0, cut.start) : text;
+  const redacted = head.replace(ESCAPED_JSON_STRING_LITERAL_RE, (match, body: string) =>
+    body.includes("\\") ? `"${redactJsonStringBody(body, redact)}"` : match);
+  if (!cut) return redacted;
+  return `${redacted}${redactJsonStringBody(cut.body, redact)}`;
+}
+
+function redactRunLogContentAt(
+  content: string,
+  redact: (text: string) => string,
+  depth: number,
+  pageStart: boolean,
+): string {
+  // Decoded strings are walked again: an ACP chunk is itself a JSON event
+  // whose tool output is escaped a second time.
+  const redactDecoded = (text: string) => depth > 0
+    ? redactRunLogContentAt(text, redact, depth - 1, false)
+    : redact(text);
+  const redactPlain = (text: string) => redact(depth > 0 ? redactEscapedJsonStringLiterals(text, redactDecoded) : text);
+  const lines = content.split("\n");
+  const out: string[] = [];
+  let plain: string[] = [];
+  const flushPlain = () => {
+    if (plain.length > 0) out.push(redactPlain(plain.join("\n")));
+    plain = [];
+  };
+  lines.forEach((line, index) => {
+    if (line.startsWith("{\"")) {
+      flushPlain();
+      out.push(redactJsonRecordLine(line, false, redactDecoded));
+    } else if (index === 0 && pageStart && startsInsideJsonString(line)) {
+      out.push(redactJsonRecordLine(line, true, redactDecoded));
+    } else {
+      plain.push(line);
+    }
+  });
+  flushPlain();
+  return out.join("\n");
+}
+
+/**
+ * Apply `redact` to the text a run log actually carries (ACC-3241). The log
+ * store writes NDJSON records (run-log-store.ts) whose tool output is
+ * JSON-escaped inside string fields, and an ACP chunk is itself a JSON event,
+ * so redaction runs on the decoded text of each string literal, nested
+ * records included (bounded depth), and every record is re-encoded, staying
+ * valid JSON. Records cut by the page window (`offset` / `limitBytes`) are
+ * handled the same way. Consecutive lines that are not records are redacted
+ * together as plain text, so multi-line material (PEM blocks) still matches.
+ * Content the redaction leaves unchanged keeps its original bytes. `content`
+ * is a served log page by default; `chunk` marks a single chunk before it is
+ * stored, one level shallower.
+ */
+export function redactRunLogContent(
+  content: string,
+  redact: (text: string) => string,
+  options: { pageStart?: boolean; chunk?: boolean } = {},
+): string {
+  const depth = options.chunk ? MAX_NESTED_CHUNK_DEPTH : MAX_NESTED_CHUNK_DEPTH + 1;
+  return redactRunLogContentAt(content, redact, depth, options.pageStart ?? !options.chunk);
 }

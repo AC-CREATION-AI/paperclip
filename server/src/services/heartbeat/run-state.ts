@@ -353,6 +353,7 @@ const heartbeatRunReadAccessColumns = {
 
 const heartbeatRunLogAccessColumns = {
   ...heartbeatRunReadAccessColumns,
+  agentId: heartbeatRuns.agentId,
   logStore: heartbeatRuns.logStore,
   logRef: heartbeatRuns.logRef,
   runtimeMode: heartbeatRuns.runtimeMode,

@@ -1333,6 +1333,43 @@ describeEmbeddedPostgres("secretService", () => {
     expect(JSON.stringify([...events, ...activities])).not.toContain("runtime-secret");
   });
 
+  it("resolves every bound version for run-log redaction without recording an access (ACC-3241)", async () => {
+    const companyId = await seedCompany();
+    const svc = secretService(db);
+    const { agentId, heartbeatRunId } = await seedAgentRun(companyId);
+    const secret = await svc.create(companyId, {
+      name: `run-log-redaction-${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "pinned-version-one-value",
+    });
+    await svc.rotate(secret.id, { value: "latest-version-two-value" });
+    await svc.createBinding({
+      companyId,
+      secretId: secret.id,
+      targetType: "agent",
+      targetId: agentId,
+      configPath: "env.PINNED_KEY",
+      versionSelector: 1,
+    });
+    await svc.createBinding({
+      companyId,
+      secretId: secret.id,
+      targetType: "agent",
+      targetId: agentId,
+      configPath: "env.LATEST_KEY",
+    });
+    const before = await db.select({ lastResolvedAt: companySecrets.lastResolvedAt })
+      .from(companySecrets).where(eq(companySecrets.id, secret.id));
+
+    const values = await svc.resolveSecretValuesForRunRedaction(companyId, { agentId, runId: heartbeatRunId });
+
+    expect([...values].sort()).toEqual(["latest-version-two-value", "pinned-version-one-value"]);
+    expect(await svc.listAccessEvents(companyId, secret.id)).toHaveLength(0);
+    const after = await db.select({ lastResolvedAt: companySecrets.lastResolvedAt })
+      .from(companySecrets).where(eq(companySecrets.id, secret.id));
+    expect(after).toEqual(before);
+  });
+
   it("rejects long-lived, mismatched-run, and unbound agent secret reads", async () => {
     const companyId = await seedCompany();
     const svc = secretService(db);
