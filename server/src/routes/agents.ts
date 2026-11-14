@@ -7746,6 +7746,17 @@ export function agentRoutes(
       return;
     }
 
+    // Preserve source visibility (404) before enforcing the narrower raw-log ACL.
+    // Operations without a run have no agent owner: only board operators may read.
+    const run = operation.heartbeatRunId
+      ? await heartbeat.getRunLogAccess(operation.heartbeatRunId)
+      : { id: operation.id, companyId: operation.companyId, agentId: null };
+    if (!run || run.companyId !== operation.companyId) {
+      res.status(404).json({ error: "Workspace operation not found" });
+      return;
+    }
+    if (!(await assertRunLogReadAllowed(req, res, run))) return;
+
     const offset = Number(req.query.offset ?? 0);
     const limitBytes = readRunLogLimitBytes(req.query.limitBytes);
     const result = await workspaceOperations.readLog(operationId, {
@@ -7754,7 +7765,7 @@ export function agentRoutes(
     });
 
     res.set("Cache-Control", "no-cache, no-store");
-    res.json(result);
+    res.json(await runRedactions.redactRunLog(operation.companyId, run, result));
   });
 
   router.get("/issues/:issueId/live-runs", async (req, res) => {

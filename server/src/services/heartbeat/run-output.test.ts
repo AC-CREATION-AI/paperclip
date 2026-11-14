@@ -115,6 +115,23 @@ describe("heartbeat run output log recovery", () => {
     );
   });
 
+  it("keeps stdout and stderr excerpts on the same family/ACP redaction path as the log", async () => {
+    const { provider, objects } = createMemoryProvider();
+    const store = createDurableRunLogStore({ basePath: baseDir, s3: { provider } });
+    const row = { ...newRunRow };
+    const { output, onLog } = await beginAttempt(store, row);
+    const secret = `sk-${"syntheticOnly".repeat(5)}`;
+    const nested = JSON.stringify({ content: JSON.stringify({ text: secret }) });
+    await onLog("stdout", `hello ${secret}\n${nested}`);
+    await onLog("stderr", nested);
+    await store.finalize(output.handle!);
+    expect(output.stdoutExcerpt).toContain("hello");
+    for (const text of [output.stdoutExcerpt, output.stderrExcerpt, objects.get(row.logRef!)!.toString()]) {
+      expect(text).not.toContain(secret);
+      expect(text).toContain("REDACTED");
+    }
+  });
+
   it("makes no remote log recovery request for a new run", async () => {
     const { provider, calls } = createMemoryProvider();
     const store = createDurableRunLogStore({ basePath: baseDir, s3: { provider } });

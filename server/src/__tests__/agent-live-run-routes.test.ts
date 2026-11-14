@@ -663,6 +663,34 @@ describe("agent live run routes", () => {
     );
   });
 
+  it.each(["agent-1", "other-agent", null])("restricts workspace logs to their run agent and board (%s)", async (agentId) => {
+    mockWorkspaceOperationService.getById.mockResolvedValue({
+      id: "operation-1", companyId: "company-1", heartbeatRunId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    mockWorkspaceOperationService.readLog.mockResolvedValue({ content: "workspace chunk", nextOffset: 17 });
+    const actor = agentId
+      ? { type: "agent", companyId: "company-1", agentId, source: "agent_key" }
+      : { type: "board", companyIds: ["company-1"], userId: "operator-1", source: "session", isInstanceAdmin: false };
+    const query = { from: vi.fn().mockReturnThis(), where: vi.fn().mockReturnThis(),
+      limit: vi.fn(async () => [{ companyId: "company-1", scopeKind: "company", issueId: null }]) };
+    const res = await requestApp(await createApp({ select: () => query }, actor), url => request(url).get("/api/workspace-operations/operation-1/log"));
+    expect(res.status).toBe(agentId === "other-agent" ? 403 : 200);
+    if (res.status === 200) {
+      expect(mockRunSecretRedactionRegistry.redactRunLog).toHaveBeenCalledWith("company-1",
+        expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", agentId: "agent-1" }),
+        expect.objectContaining({ content: "workspace chunk" }));
+    } else {
+      expect(mockWorkspaceOperationService.readLog).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps invisible workspace logs at 404 before the log ACL", async () => {
+    mockWorkspaceOperationService.getById.mockResolvedValue(null);
+    const res = await requestApp(await createApp(), url => request(url).get("/api/workspace-operations/operation-1/log"));
+    expect(res.status).toBe(404);
+    expect(mockWorkspaceOperationService.readLog).not.toHaveBeenCalled();
+  });
+
   it("allows the run's own agent identity to read its log (ACC-3241)", async () => {
     const actor = { type: "agent", companyId: "company-1", agentId: "agent-1", source: "agent_key" };
     const app = await createApp({}, actor);
