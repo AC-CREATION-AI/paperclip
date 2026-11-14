@@ -4,6 +4,7 @@ import {
   parseClaudeStreamJson,
   detectClaudeLoginRequired,
   extractClaudeRetryNotBefore,
+  isClaudeGatewayRateLimitError,
   isClaudeProviderQuotaError,
   isClaudeTransientUpstreamError,
   isClaudePoisonedPreviousMessageIdError,
@@ -489,6 +490,35 @@ describe("extractClaudeRetryNotBefore", () => {
     expect(
       extractClaudeRetryNotBefore({ errorMessage: "Overloaded. Try again later." }, new Date()),
     ).toBeNull();
+  });
+
+  it.each([
+    ["reset after 4m 28s", "2026-11-12T17:47:28.000Z"],
+    ["reset after 10m", "2026-11-12T17:53:00.000Z"],
+    ["reset after 1h 26m 15s", "2026-11-12T19:09:15.000Z"],
+    ["reset after 45s", "2026-11-12T17:43:45.000Z"],
+  ])("parses the OmniRoute 429 countdown '%s' with a 30 s margin", (reset, expected) => {
+    // Message read on the 12/11 runs that failed on the OmniRoute pre-dispatch filters (ACC-4351).
+    const now = new Date("2026-11-12T17:42:30.000Z");
+    const errorMessage = "ACP agent reported a terminal limit failure.\nAPI Error: Request rejected (429) · " +
+      `Service temporarily unavailable: all targets were skipped by pre-dispatch filters ${reset}`;
+    expect(extractClaudeRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(expected);
+  });
+
+  it("ignores a countdown with no rate-limit signal on its line", () => {
+    expect(
+      extractClaudeRetryNotBefore({ errorMessage: "The cache will reset after 5m of inactivity." }, new Date()),
+    ).toBeNull();
+  });
+});
+
+describe("isClaudeGatewayRateLimitError", () => {
+  it("recognizes the OmniRoute pre-dispatch 429 and leaves generic rate-limit wording out", () => {
+    expect(isClaudeGatewayRateLimitError({
+      errorMessage: "API Error: Request rejected (429) · Service temporarily unavailable: all targets were skipped by pre-dispatch filters reset after 4m 28s",
+    })).toBe(true);
+    expect(isClaudeGatewayRateLimitError({ errorMessage: "Rate limit exceeded; retry later" })).toBe(false);
+    expect(isClaudeGatewayRateLimitError({ errorMessage: "Context window limit exceeded" })).toBe(false);
   });
 });
 

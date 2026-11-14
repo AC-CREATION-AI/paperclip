@@ -245,12 +245,16 @@ export function readHeartbeatRunErrorFamily(
   const persistedFamily = readNonEmptyString(resultJson.errorFamily);
   if (persistedFamily) return persistedFamily;
 
-  if (run.errorCode === "provider_quota") {
+  if (
+    run.errorCode === "provider_quota" ||
+    run.errorCode === "omniroute_provider_quota"
+  ) {
     return "provider_quota";
   }
   if (
     run.errorCode === "codex_transient_upstream" ||
     run.errorCode === "claude_transient_upstream" ||
+    run.errorCode === "omniroute_transient_upstream" ||
     run.errorCode === "codex_harness_crash"
   ) {
     return "transient_upstream";
@@ -258,8 +262,29 @@ export function readHeartbeatRunErrorFamily(
   return null;
 }
 
+// OmniRoute reports its pre-dispatch quota window as a countdown in the error
+// text ("... reset after 4m 28s", "reset after 1h 26m 15s", "reset after 10m").
+const RELATIVE_RESET_AFTER_RE =
+  /(?:\b429\b|rate[-\s]?limit|quota|pre-dispatch\s+filters|temporarily\s+unavailable)[^\n]{0,600}?\bresets?\s+(?:after|in)\s+(?:(\d+)\s*h(?![a-z])\s*)?(?:(\d+)\s*m(?![a-z])\s*)?(?:(\d+)\s*s(?![a-z]))?/i;
+// The countdown is rounded down to the second and measured on the gateway's
+// clock: never retry on the boundary itself.
+export const RELATIVE_RESET_AFTER_MARGIN_MS = 30_000;
+
+export function parseRelativeResetAfter(
+  text: string | null | undefined,
+  reference: Date,
+): Date | null {
+  const match = typeof text === "string" ? RELATIVE_RESET_AFTER_RE.exec(text) : null;
+  if (!match || (!match[1] && !match[2] && !match[3])) return null;
+  const seconds =
+    Number(match[1] ?? 0) * 3600 + Number(match[2] ?? 0) * 60 + Number(match[3] ?? 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return new Date(reference.getTime() + seconds * 1000 + RELATIVE_RESET_AFTER_MARGIN_MS);
+}
+
 function readTransientRetryNotBeforeFromRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson"> &
+    Partial<Pick<typeof heartbeatRuns.$inferSelect, "error" | "finishedAt">>,
 ) {
   const resultJson = parseObject(run.resultJson);
   const value = resultJson.retryNotBefore ?? resultJson.transientRetryNotBefore;
@@ -268,14 +293,17 @@ function readTransientRetryNotBeforeFromRun(
     typeof value === "number" ||
     value instanceof Date
   )) {
-    return null;
+    // Adapters that only carry the reset in their message (omniroute_native)
+    // still get a retry after the window, counted from the failure itself.
+    return run.finishedAt ? parseRelativeResetAfter(run.error, run.finishedAt) : null;
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 export function readTransientRecoveryContractFromRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson"> &
+    Partial<Pick<typeof heartbeatRuns.$inferSelect, "error" | "finishedAt">>,
 ) {
   const errorFamily = readHeartbeatRunErrorFamily(run);
   return errorFamily === "transient_upstream" ||
