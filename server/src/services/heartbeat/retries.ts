@@ -17,6 +17,7 @@ import {
   accountingForScheduledRetry,
 } from "../execution-recovery-attempt.js";
 import { WORKSPACE_GIT_SCAN_ERROR_CODES } from "../workspace-git-operation-scheduler.js";
+import { readGatewayRateLimitWindow } from "@paperclipai/adapter-utils/gateway-rate-limit-window";
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE } from "../legacy-controller-lease.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -258,8 +259,23 @@ export function readHeartbeatRunErrorFamily(
   return null;
 }
 
+/**
+ * Read the gateway rate-limit window a provider announced in its error text
+ * ("... reset after 4m 28s", "reset after 1h 26m 15s").
+ *
+ * The countdown and the limit signal must sit on the same line: a countdown
+ * quoted on another line belongs to a different subject and is ignored.
+ */
+export function parseRelativeResetAfter(
+  text: string | null | undefined,
+  reference: Date,
+): Date | null {
+  return readGatewayRateLimitWindow(text, reference);
+}
+
 function readTransientRetryNotBeforeFromRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson"> &
+    Partial<Pick<typeof heartbeatRuns.$inferSelect, "error" | "finishedAt">>,
 ) {
   const resultJson = parseObject(run.resultJson);
   const value = resultJson.retryNotBefore ?? resultJson.transientRetryNotBefore;
@@ -268,14 +284,17 @@ function readTransientRetryNotBeforeFromRun(
     typeof value === "number" ||
     value instanceof Date
   )) {
-    return null;
+    // An adapter that carries the window only in its message still gets a
+    // retry after that window, counted from the failure itself.
+    return run.finishedAt ? parseRelativeResetAfter(run.error, run.finishedAt) : null;
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 export function readTransientRecoveryContractFromRun(
-  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson">,
+  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode" | "resultJson"> &
+    Partial<Pick<typeof heartbeatRuns.$inferSelect, "error" | "finishedAt">>,
 ) {
   const errorFamily = readHeartbeatRunErrorFamily(run);
   return errorFamily === "transient_upstream" ||
