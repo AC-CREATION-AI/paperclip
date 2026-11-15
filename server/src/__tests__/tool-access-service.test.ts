@@ -5340,7 +5340,7 @@ describeEmbeddedPostgres("tool access service", () => {
       await request(app).get(`/api/tool-connections/${connection.id}/installs`),
       await request(app)
         .put(`/api/tool-connections/${connection.id}/installs`)
-        .send({ installs: [] }),
+        .send({ installs: [], expectedRevision: 0 }),
       await request(app).get(
         `/api/tool-connections/${connection.id}/test-agents`,
       ),
@@ -20344,7 +20344,7 @@ describeEmbeddedPostgres("tool access service", () => {
 
     const put = await request(app)
       .put(`/api/tool-connections/${connection.id}/installs`)
-      .send({ installs: [{ targetType: "agent", targetId: agent.id }] });
+      .send({ installs: [{ targetType: "agent", targetId: agent.id }], expectedRevision: (await request(app).get(`/api/tool-connections/${connection.id}/installs`).expect(200)).body.revision });
 
     expect(put.status).toBe(200);
     expect(put.body).toMatchObject({
@@ -20432,7 +20432,7 @@ describeEmbeddedPostgres("tool access service", () => {
 
     await request(app)
       .put(`/api/tool-connections/${connection.id}/installs`)
-      .send({ installs: [{ targetType: "agent", targetId: agent.id }] })
+      .send({ installs: [{ targetType: "agent", targetId: agent.id }], expectedRevision: (await request(app).get(`/api/tool-connections/${connection.id}/installs`).expect(200)).body.revision })
       .expect(200);
 
     const [profile] = await db
@@ -20468,7 +20468,7 @@ describeEmbeddedPostgres("tool access service", () => {
 
     await request(app)
       .put(`/api/tool-connections/${connection.id}/installs`)
-      .send({ installs: [] })
+      .send({ installs: [], expectedRevision: (await request(app).get(`/api/tool-connections/${connection.id}/installs`).expect(200)).body.revision })
       .expect(200);
 
     // The install row is gone, so the agent can no longer reach the connection.
@@ -20580,11 +20580,11 @@ describeEmbeddedPostgres("tool access service", () => {
 
     await request(app)
       .put(`/api/tool-connections/${connection.id}/installs`)
-      .send({ installs: [{ targetType: "agent", targetId: agent.id }] })
+      .send({ installs: [{ targetType: "agent", targetId: agent.id }], expectedRevision: (await request(app).get(`/api/tool-connections/${connection.id}/installs`).expect(200)).body.revision })
       .expect(200);
     await request(app)
       .put(`/api/tool-connections/${connection.id}/installs`)
-      .send({ installs: [] })
+      .send({ installs: [], expectedRevision: (await request(app).get(`/api/tool-connections/${connection.id}/installs`).expect(200)).body.revision })
       .expect(200);
 
     const audits = await db

@@ -337,6 +337,27 @@ export const toolConnectionInstalls = pgTable(
   ],
 );
 
+/**
+ * Monotonic revision of one connection's install set (ACC-4941). Statement
+ * triggers on tool_connection_installs bump it for every writer (REST, internal
+ * services, other processes sharing the database). A versioned install
+ * replacement locks this row and rejects a stale expectedRevision before it
+ * mutates anything. Kept out of tool_connections so a bump does not fire that
+ * table's company-wide runtime invalidation trigger.
+ */
+export const toolConnectionInstallRevisions = pgTable(
+  "tool_connection_install_revisions",
+  {
+    connectionId: uuid("connection_id").primaryKey().references(() => toolConnections.id, { onDelete: "cascade" }),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("tool_connection_install_revisions_company_idx").on(table.companyId),
+  ],
+);
+
 export const toolOauthStates = pgTable(
   "tool_oauth_states",
   {

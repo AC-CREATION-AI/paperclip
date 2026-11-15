@@ -420,7 +420,7 @@ describe("AgentToolsTab", () => {
       installedConnections: [],
     } satisfies ToolProfileEffectiveSummary);
     mockToolsApi.listConnections.mockResolvedValue({
-      connections: [{ id: "conn-1", companyId: "company-1", name: "Production GitHub", installs: [] }],
+      connections: [{ id: "conn-1", companyId: "company-1", name: "Production GitHub", installs: [], installsRevision: 4 }],
     });
     mockToolsApi.listPolicies.mockResolvedValue({ policies: [] });
     mockToolsApi.listCatalog.mockResolvedValue({ catalog: [allowed] });
@@ -441,6 +441,6 @@ describe("AgentToolsTab", () => {
 
     expect(mockToolsApi.putConnectionInstalls).toHaveBeenCalledWith("conn-1", [
       { targetType: "agent", targetId: "agent-1" },
-    ]);
+    ], 4);
   });
 });

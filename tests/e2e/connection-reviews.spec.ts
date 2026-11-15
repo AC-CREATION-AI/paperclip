@@ -164,7 +164,10 @@ for (const journey of [
       );
       await json(
         await request.put(`/api/tool-connections/${connection.id}/installs`, {
-          data: { installs: [{ targetType: "agent", targetId: agent.id }] },
+          data: {
+            installs: [{ targetType: "agent", targetId: agent.id }],
+            expectedRevision: (await json<{ revision: number }>(await request.get(`/api/tool-connections/${connection.id}/installs`))).revision,
+          },
         }),
       );
       await page.goto(`/${seed.prefix}/apps/${connection.id}/permissions`);

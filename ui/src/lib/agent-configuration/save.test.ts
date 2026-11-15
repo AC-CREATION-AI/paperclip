@@ -44,7 +44,7 @@ beforeEach(() => {
   api.agents.listConfigRevisions.mockResolvedValue([{ id: "revision", source: "board", changedKeys: ["name"] }]);
   api.tools.listConnections.mockResolvedValue({ connections: [copy(connection)] });
   api.tools.listProfiles.mockResolvedValue({ profiles: [] }); api.tools.listPolicies.mockResolvedValue({ policies: [] });
-  api.tools.getConnectionInstalls.mockResolvedValue({ installs });
+  api.tools.getConnectionInstalls.mockResolvedValue({ installs, revision: 7 });
   api.tools.createProfile.mockResolvedValue({ id: "new-profile" });
   api.channels.list.mockResolvedValue([channel]); api.channels.get.mockResolvedValue(channel);
   api.channels.listResources.mockResolvedValue([{ id: resourceId, enabled: true }]); api.channels.listPrincipals.mockResolvedValue([{ principalId: "principal" }]);
@@ -158,7 +158,7 @@ describe("complete agent configuration", () => {
     expect(api.agents.update).toHaveBeenCalledExactlyOnceWith(agentId, { title: "Engineer", expectedConfigurationRevision: agent.configurationRevision }, "company");
     expect(api.agents.saveInstructionsFile).toHaveBeenCalledWith(agentId, { path: "AGENTS.md", content: "# Revised\n", baseHash: "hash", baseRevisionId: "revision-file" }, "company");
     expect(api.agents.syncSkills).toHaveBeenCalledWith(agentId, [], "replace", "company");
-    expect(api.tools.putConnectionInstalls).toHaveBeenCalledWith("connection", [{ targetType: "agent", targetId: "another-agent" }]);
+    expect(api.tools.putConnectionInstalls).toHaveBeenCalledWith("connection", [{ targetType: "agent", targetId: "another-agent" }], 7);
     expect(api.channels.update).toHaveBeenCalledExactlyOnceWith("channel", { allowUnlinkedPeople: true });
     expect(api.channels.updateResources).toHaveBeenCalledWith("channel", [{ id: resourceId, enabled: false, executionDefaults: null }]);
     expect(api.channels.revokeLink).toHaveBeenCalledWith("channel", "principal");
@@ -405,11 +405,11 @@ describe("compact agent configuration", () => {
 
   it("installs an unselected connection without serializing the available catalog", async () => {
     api.tools.listConnections.mockResolvedValue({ connections: [{ ...connection, installs: [] }] });
-    api.tools.getConnectionInstalls.mockResolvedValue({ installs: [] });
+    api.tools.getConnectionInstalls.mockResolvedValue({ installs: [], revision: 7 });
     const saved = await snapshot();
     expect(saved.document.spec.tools!.connections).toEqual([]);
     await saveAgentConfiguration(saved, input({ tools: { connections: [{ connectionId: "connection" }] } }), receipt, progress);
-    expect(api.tools.putConnectionInstalls).toHaveBeenCalledWith("connection", [{ targetType: "agent", targetId: agentId }]);
+    expect(api.tools.putConnectionInstalls).toHaveBeenCalledWith("connection", [{ targetType: "agent", targetId: agentId }], 7);
   });
 
   it("ignores unrelated catalog additions during a profile binding edit", async () => {
@@ -436,7 +436,7 @@ describe("compact agent configuration", () => {
     expect(api.agents.update).toHaveBeenCalledWith(agentId, expect.objectContaining({ title: null }), "company");
     expect(api.agents.syncSkills).toHaveBeenCalledWith(agentId, [], "replace", "company");
     expect(api.tools.unbindProfile).toHaveBeenCalledWith("company", "profile", { targetType: "agent", targetId: agentId });
-    expect(api.tools.putConnectionInstalls).toHaveBeenCalledWith("connection", [{ targetType: "agent", targetId: "another-agent" }]);
+    expect(api.tools.putConnectionInstalls).toHaveBeenCalledWith("connection", [{ targetType: "agent", targetId: "another-agent" }], 7);
     expect(api.agents.deleteInstructionsFile).not.toHaveBeenCalled();
   });
 

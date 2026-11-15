@@ -172,6 +172,7 @@ export {
   connectionGrantMembers,
   connectionGrantDelegations,
   toolConnectionInstalls,
+  toolConnectionInstallRevisions,
   toolOauthStates,
   toolCatalogEntries,
   toolProfiles,

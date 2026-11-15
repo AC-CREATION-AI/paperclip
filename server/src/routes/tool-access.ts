@@ -1934,7 +1934,8 @@ function connectorEnrollmentPrincipal(req: Request): string {
     assertBoardOrAgent(req);
     const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
     if (!connection) return;
-    res.json({ connectionId: connection.id, installs: connection.installs ?? [] });
+    // `revision` must be echoed as `expectedRevision` on PUT (ACC-4941).
+    res.json({ connectionId: connection.id, installs: connection.installs ?? [], revision: connection.installsRevision ?? 0 });
   });
 
   router.put(
@@ -1994,6 +1995,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
         entityId: connection.id,
         details: {
           installs: snapshot.installs.map((install) => ({ targetType: install.targetType, targetId: install.targetId })),
+          revision: snapshot.revision,
         },
       });
       res.json(snapshot);

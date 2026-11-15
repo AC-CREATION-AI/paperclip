@@ -26,8 +26,9 @@ export function EmailConnectionAccess({
   const save = useMutation({
     mutationFn: (
       next: Array<{ targetType: "company" | "agent"; targetId: string }>,
-    ) => toolsApi.putConnectionInstalls(connectionId, next),
-    onSuccess: () => {
+    ) => toolsApi.putConnectionInstalls(connectionId, next, installs.data?.revision ?? 0),
+    // A 409 (installs changed elsewhere) also refetches, so a retry uses the fresh revision.
+    onSettled: () => {
       void cache.invalidateQueries({
         queryKey: queryKeys.tools.connectionInstalls(connectionId),
       });

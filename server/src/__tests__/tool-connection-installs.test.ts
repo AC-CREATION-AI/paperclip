@@ -110,10 +110,14 @@ describeDatabase("connection install permission preservation", () => {
     const app = createRouteApp(db);
     const service = toolAccessService(db);
     const policy = toolAccessPolicyService(db);
-    const putTargets = (installs: Array<{ targetType: "agent" | "company"; targetId: string }>) => request(app)
-      .put(`/api/tool-connections/${connection.id}/installs`)
-      .send({ installs })
-      .expect(response => expect(response.status, JSON.stringify(response.body)).toBe(200));
+    const putTargets = async (installs: Array<{ targetType: "agent" | "company"; targetId: string }>) => {
+      // Compare-and-write (ACC-4941): read the current revision, then echo it.
+      const current = await request(app).get(`/api/tool-connections/${connection.id}/installs`).expect(200);
+      return request(app)
+        .put(`/api/tool-connections/${connection.id}/installs`)
+        .send({ installs, expectedRevision: current.body.revision })
+        .expect(response => expect(response.status, JSON.stringify(response.body)).toBe(200));
+    };
     const putInstalls = (ids: string[]) => putTargets(ids.map(targetId => ({ targetType: "agent", targetId })));
     const appBindings = () => db.select().from(toolProfileBindings)
       .where(and(eq(toolProfileBindings.companyId, companyId), eq(toolProfileBindings.profileId, appProfile.id)));

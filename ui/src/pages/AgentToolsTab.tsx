@@ -407,6 +407,7 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
       return toolsApi.putConnectionInstalls(
         connection.id,
         installPayload(connection.companyId ?? companyId, nextState),
+        connection.installsRevision ?? 0,
       );
     },
     onSuccess: async (_snapshot, variables) => {
@@ -426,6 +427,8 @@ export function AgentToolsTab({ agent, companyId }: { agent: AgentDetailRecord; 
         connectionId: variables.connection.id,
         installed: variables.installed,
       };
+      // A 409 means installs changed elsewhere: reload them and their revision.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.tools.connections(companyId) });
     },
   });
 
