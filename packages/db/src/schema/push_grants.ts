@@ -1,4 +1,5 @@
 import type { PushGrantForge, PushGrantMode, PushGrantOutcome } from "@paperclipai/shared";
+import { sql } from "drizzle-orm";
 import { index, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
@@ -43,6 +44,11 @@ export const pushGrants = pgTable(
   },
   (table) => ({
     companyRequestIdUq: uniqueIndex("push_grants_company_request_id_uq").on(table.companyId, table.requestId),
+    // One human agreement = one push (ACC-4966 H1.b). Only grants that ended
+    // without any external effect release the agreement.
+    activeInteractionUq: uniqueIndex("push_grants_active_interaction_uq")
+      .on(table.interactionId)
+      .where(sql`${table.outcome} not in ('failed', 'expired', 'revoked', 'rejected')`),
     companyRepoRefConsumedIdx: index("push_grants_company_repo_ref_consumed_idx").on(
       table.companyId,
       table.repository,

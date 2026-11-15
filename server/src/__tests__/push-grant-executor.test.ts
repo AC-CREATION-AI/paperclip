@@ -1,5 +1,13 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { canonicalGitHubRemoteUrl, githubPushGrantForge, PushGrantForgeError } from "../services/push-grant-executor.js";
+import {
+  assertConfinedPushSource,
+  canonicalGitHubRemoteUrl,
+  githubPushGrantForge,
+  PushGrantForgeError,
+} from "../services/push-grant-executor.js";
 
 const OLD = "1f602c24618f89215bf714c0b80aee3447866efd";
 const NEW = "2aba7b069562445dd71316b61e5328de3bd53362";
@@ -75,5 +83,33 @@ describe("githubPushGrantForge (ACC-4931)", () => {
       await expect(forge.push({ ...base, ...overrides } as never)).rejects.toBeInstanceOf(PushGrantForgeError);
     }
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("assertConfinedPushSource (ACC-4966 B3)", () => {
+  it("accepts a plain repository inside a root and refuses gitdir files, alternates, relative and outside paths", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-push-source-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-push-source-out-"));
+    try {
+      const ok = path.join(root, "ok");
+      await fs.mkdir(path.join(ok, ".git", "objects", "info"), { recursive: true });
+      expect(await assertConfinedPushSource(ok, [root])).toBe(await fs.realpath(ok));
+
+      const gitdir = path.join(root, "gitdir");
+      await fs.mkdir(gitdir);
+      await fs.writeFile(path.join(gitdir, ".git"), "gitdir: /elsewhere/.git\n");
+      const alternates = path.join(root, "alternates");
+      await fs.mkdir(path.join(alternates, ".git", "objects", "info"), { recursive: true });
+      await fs.writeFile(path.join(alternates, ".git", "objects", "info", "alternates"), "/elsewhere/objects\n");
+      await fs.mkdir(path.join(outside, ".git"));
+
+      for (const candidate of [gitdir, alternates, outside, "relative/repo", path.join(root, "missing")]) {
+        await expect(assertConfinedPushSource(candidate, [root])).rejects.toMatchObject({ code: "source_unavailable" });
+      }
+      await expect(assertConfinedPushSource(ok, [path.join(root, "absent-root")])).rejects.toMatchObject({ code: "source_unavailable" });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });

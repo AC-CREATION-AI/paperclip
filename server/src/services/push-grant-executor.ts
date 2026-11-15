@@ -31,7 +31,13 @@ export interface PushGrantForgeClient {
 
 export class PushGrantForgeError extends Error {
   constructor(
-    readonly code: "invalid_repository" | "source_missing" | "not_fast_forward" | "remote_unavailable" | "push_failed",
+    readonly code:
+      | "invalid_repository"
+      | "source_missing"
+      | "source_unavailable"
+      | "not_fast_forward"
+      | "remote_unavailable"
+      | "push_failed",
     message: string,
   ) {
     super(message);
@@ -58,6 +64,54 @@ function assertStructured(ref: string, ...shas: string[]) {
   for (const sha of shas) {
     if (!SHA_RE.test(sha)) throw new PushGrantForgeError("invalid_repository", "SHA must be 40 lowercase hex characters");
   }
+}
+
+function isInside(child: string, parent: string) {
+  const relative = path.relative(parent, child);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+/**
+ * Confine the run workspace used as the object source (ACC-4966 B3).
+ *
+ * Fails closed with `source_unavailable` when the workspace resolves outside
+ * the instance's workspace roots, when `.git` is not a plain directory (a
+ * `gitdir:` file or a symlink pointing at another repository), or when the
+ * object store borrows objects from elsewhere (`objects/info/alternates`).
+ * Returns the resolved workspace path to fetch from.
+ */
+export async function assertConfinedPushSource(sourceCwd: string, allowedRoots: readonly string[]): Promise<string> {
+  const refuse = (message: string): never => {
+    throw new PushGrantForgeError("source_unavailable", message);
+  };
+  if (!path.isAbsolute(sourceCwd)) refuse("Run workspace is not an absolute path");
+  let resolved: string;
+  try {
+    resolved = await fs.realpath(sourceCwd);
+  } catch {
+    return refuse("Run workspace is not available");
+  }
+  const roots: string[] = [];
+  for (const root of allowedRoots) {
+    try {
+      roots.push(await fs.realpath(root));
+    } catch {
+      // A root that does not exist on this instance confines nothing.
+    }
+  }
+  if (!roots.some((root) => isInside(resolved, root))) refuse("Run workspace is outside the allowed workspace roots");
+  const gitDir = path.join(resolved, ".git");
+  let gitStat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    gitStat = await fs.lstat(gitDir);
+  } catch {
+    return refuse("Run workspace is not a git repository");
+  }
+  if (!gitStat.isDirectory()) refuse("Run workspace .git must be a directory, not a gitdir link");
+  const alternates = path.join(gitDir, "objects", "info", "alternates");
+  const hasAlternates = await fs.lstat(alternates).then(() => true, () => false);
+  if (hasAlternates) refuse("Run workspace borrows objects from another repository");
+  return resolved;
 }
 
 type ExecGit = (args: string[], options: { cwd?: string; env: Record<string, string> }) => Promise<{ stdout: string }>;

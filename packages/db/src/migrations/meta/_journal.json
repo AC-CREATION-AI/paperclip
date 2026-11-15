@@ -2934,6 +2934,13 @@
       "when": 1794754482998,
       "tag": "0420_peaceful_smiling_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 421,
+      "version": "7",
+      "when": 1794760404331,
+      "tag": "0421_awesome_mantis",
+      "breakpoints": true
     }
   ]
 }

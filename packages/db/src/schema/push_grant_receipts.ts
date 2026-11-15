@@ -1,6 +1,8 @@
 import type { PushGrantReceiptStatus } from "@paperclipai/shared";
 import { index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { agents } from "./agents.js";
 import { companies } from "./companies.js";
+import { heartbeatRuns } from "./heartbeat_runs.js";
 import { pushGrants } from "./push_grants.js";
 
 export const pushGrantReceipts = pgTable(
@@ -13,6 +15,13 @@ export const pushGrantReceipts = pgTable(
     grantId: uuid("grant_id")
       .notNull()
       .references(() => pushGrants.id, { onDelete: "cascade" }),
+    /** Replays are bound to the run and agent that consumed (ACC-4966 B4). */
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => heartbeatRuns.id, { onDelete: "cascade" }),
     requestId: text("request_id").notNull(),
     argumentsHash: text("arguments_hash").notNull(),
     status: text("status").$type<PushGrantReceiptStatus>().notNull(),

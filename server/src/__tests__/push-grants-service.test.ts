@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
@@ -12,6 +15,7 @@ import {
   issueThreadInteractions,
   issues,
   pushGrantReceipts,
+  pushGrantRepositories,
   pushGrants,
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
@@ -70,8 +74,10 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
   let goalId!: string;
   let forge!: FakeForge;
   let seq = 0;
+  let workspaceRoot!: string;
+  let workspaceCwd!: string;
 
-  const service = () => pushGrantService(db, { forgeFor: () => forge });
+  const service = () => pushGrantService(db, { forgeFor: () => forge, workspaceRoots: () => [workspaceRoot] });
 
   async function liveRun(input: { agent?: string; issue?: string; status?: string; cwd?: string | null } = {}) {
     const id = randomUUID();
@@ -82,7 +88,7 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
       status: input.status ?? "running",
       contextSnapshot: {
         issueId: input.issue ?? issueId,
-        ...(input.cwd === null ? {} : { paperclipWorkspace: { cwd: input.cwd ?? "/workspace/repo" } }),
+        ...(input.cwd === null ? {} : { paperclipWorkspace: { cwd: input.cwd ?? workspaceCwd } }),
       },
     });
     return id;
@@ -92,8 +98,16 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
     return { sub: agent, company_id: companyId, run_id: runId, scope: "push_grant" as const };
   }
 
+  /** Structured agreement block (ACC-4966 H1.a); defaults match `grantInput()`. */
+  function block(overrides: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      kind: "push_grant", repository: REPO, ref: REF, mode: "force-with-lease", expectedOldSha: OLD, newSha: NEW, ...overrides,
+    });
+  }
+
   async function agreement(input: {
     issue?: string; status?: string; dismissed?: boolean; kind?: string; policy?: "human_only" | "anyone"; details?: string;
+    prompt?: string; reason?: string;
   } = {}) {
     const id = randomUUID();
     await db.insert(issueThreadInteractions).values({
@@ -108,9 +122,10 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
       dismissedAt: input.dismissed ? new Date() : null,
       payload: {
         version: 1,
-        prompt: "Autorises-tu la mise à jour de la PR ?",
-        detailsMarkdown: input.details ?? `NativeNX #16 : ${OLD} → ${NEW}`,
+        prompt: input.prompt ?? "Autorises-tu la mise à jour de la PR ?",
+        detailsMarkdown: input.details ?? block(),
       } as never,
+      result: input.reason === undefined ? null : { version: 1, outcome: "accepted", reason: input.reason } as never,
     });
     return id;
   }
@@ -167,10 +182,19 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
       { id: issueId, companyId, goalId, parentId: parentIssueId, title: "Publish heads", status: "in_progress", priority: "high", assigneeAgentId: agentId },
       { id: otherIssueId, companyId, goalId, title: "Unrelated", status: "in_progress", priority: "low", assigneeAgentId: agentId },
     ]);
+    // Server-side allowlist (ACC-4966 M2): only REPO and the default-branch fixture are allowed.
+    await db.insert(pushGrantRepositories).values([
+      { companyId, forge: "github", repository: REPO },
+      { companyId, forge: "github", repository: "AC-CREATION-AI/paperclip" },
+    ]);
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-push-grant-roots-"));
+    workspaceCwd = path.join(workspaceRoot, "repo");
+    await fs.mkdir(path.join(workspaceCwd, ".git", "objects", "info"), { recursive: true });
   }, 60_000);
 
   afterAll(async () => {
     await cleanup?.();
+    if (workspaceRoot) await fs.rm(workspaceRoot, { recursive: true, force: true });
   });
 
   beforeEach(() => {
@@ -186,7 +210,7 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
     const result = await service().consume(claimsFor(runId), grant.grantId, consumeInput());
     expect(result).toMatchObject({ status: "completed", pushed: true, outcome: "consumed", remoteHead: NEW });
     expect(forge.pushes).toHaveLength(1);
-    expect(forge.pushes[0]).toMatchObject({ repository: REPO, ref: REF, expectedOldSha: OLD, newSha: NEW, mode: "force-with-lease", sourceCwd: "/workspace/repo" });
+    expect(forge.pushes[0]).toMatchObject({ repository: REPO, ref: REF, expectedOldSha: OLD, newSha: NEW, mode: "force-with-lease", sourceCwd: await fs.realpath(workspaceCwd) });
     const [row] = await db.select().from(pushGrants).where(eq(pushGrants.id, grant.grantId));
     expect(row!.consumedAt).not.toBeNull();
     expect(row!.outcome).toBe("consumed");
@@ -203,7 +227,7 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
     await expect(service().issue(claimsFor(runId), grantInput(agentResolvable))).rejects.toMatchObject({ status: 403 });
     const otherKind = await agreement({ kind: "ask_user_questions" });
     await expect(service().issue(claimsFor(runId), grantInput(otherKind))).rejects.toMatchObject({ status: 403 });
-    const otherShas = await agreement({ details: `autre push ${OTHER}` });
+    const otherShas = await agreement({ details: block({ newSha: OTHER }) });
     await expect(service().issue(claimsFor(runId), grantInput(otherShas))).rejects.toMatchObject({ status: 403 });
     const unrelatedTask = await agreement({ issue: otherIssueId });
     await expect(service().issue(claimsFor(runId), grantInput(unrelatedTask))).rejects.toMatchObject({ status: 403 });
@@ -228,7 +252,7 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
   it("refuses an expired grant and records it as expired", async () => {
     const runId = await liveRun();
     const grant = await service().issue(claimsFor(runId), grantInput(await agreement(), { ttlSeconds: 1 }));
-    const later = pushGrantService(db, { forgeFor: () => forge, now: () => new Date(Date.now() + 5_000) });
+    const later = pushGrantService(db, { forgeFor: () => forge, workspaceRoots: () => [workspaceRoot], now: () => new Date(Date.now() + 5_000) });
     await expect(later.consume(claimsFor(runId), grant.grantId, consumeInput())).rejects.toMatchObject({ status: 410 });
     const [row] = await db.select().from(pushGrants).where(eq(pushGrants.id, grant.grantId));
     expect(row!.outcome).toBe("expired");
@@ -322,7 +346,7 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
     const input = consumeInput();
     await db.update(pushGrants).set({ consumedAt: new Date(), outcome: "consumed" }).where(eq(pushGrants.id, grant.grantId));
     await db.insert(pushGrantReceipts).values({
-      companyId, grantId: grant.grantId, requestId: input.requestId,
+      companyId, grantId: grant.grantId, agentId, runId, requestId: input.requestId,
       argumentsHash: (await import("../services/push-grants.js")).pushGrantConsumeHash(grant.grantId, input), status: "reserved",
     });
     await expect(service().consume(claimsFor(runId), grant.grantId, input)).rejects.toMatchObject({ status: 409 });
@@ -394,7 +418,7 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
     const interactionId = await agreement();
     await expect(service().issue(claimsFor(runId), grantInput(interactionId, { issueId: otherIssueId }))).rejects.toMatchObject({ status: 403 });
     const grant = await service().issue(claimsFor(runId), grantInput(interactionId));
-    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: otherIssueId, paperclipWorkspace: { cwd: "/workspace/repo" } } })
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: otherIssueId, paperclipWorkspace: { cwd: workspaceCwd } } })
       .where(eq(heartbeatRuns.id, runId));
     await expect(service().consume(claimsFor(runId), grant.grantId, consumeInput())).rejects.toMatchObject({ status: 403 });
     expect(forge.pushes).toHaveLength(0);
@@ -406,12 +430,263 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
       .rejects.toMatchObject({ status: 403 });
   });
 
+  // ACC-4966 H1.c — negative cases: none consumes a grant or touches the forge's push.
+  describe("structured, single-use human agreement (ACC-4966 H1)", () => {
+    it("#1 refuses a second grant on the same agreement after a successful consume", async () => {
+      const runId = await liveRun();
+      const interactionId = await agreement();
+      const grant = await service().issue(claimsFor(runId), grantInput(interactionId));
+      await service().consume(claimsFor(runId), grant.grantId, consumeInput());
+      forge.pushes = [];
+      forge.head = OLD;
+      const before = await grantCount();
+      await expect(service().issue(claimsFor(runId), grantInput(interactionId)))
+        .rejects.toMatchObject({ status: 409, details: { code: "agreement_used" } });
+      expect(await grantCount()).toBe(before);
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("#2 refuses a rollback grant (expectedOldSha=NEW, newSha=OLD) on the same agreement", async () => {
+      const runId = await liveRun();
+      const interactionId = await agreement();
+      const grant = await service().issue(claimsFor(runId), grantInput(interactionId));
+      await service().consume(claimsFor(runId), grant.grantId, consumeInput());
+      forge.pushes = [];
+      const before = await grantCount();
+      await expect(service().issue(claimsFor(runId), grantInput(interactionId, { expectedOldSha: NEW, newSha: OLD })))
+        .rejects.toMatchObject({ status: 403 });
+      expect(await grantCount()).toBe(before);
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("#3 #4 #5 #10 refuses a request whose repository, ref, SHA direction or mode differ from the agreement", async () => {
+      const runId = await liveRun();
+      const interactionId = await agreement();
+      const before = await grantCount();
+      for (const overrides of [
+        { repository: "AC-CREATION-AI/paperclip" },
+        { ref: "refs/heads/fix/other" },
+        { expectedOldSha: NEW, newSha: OLD },
+        { mode: "fast-forward" },
+      ]) {
+        await expect(service().issue(claimsFor(runId), grantInput(interactionId, overrides))).rejects.toMatchObject({ status: 403 });
+      }
+      expect(await grantCount()).toBe(before);
+      expect(forge.pushes).toHaveLength(0);
+      // The agreement itself stays usable for its exact tuple.
+      await expect(service().issue(claimsFor(runId), grantInput(interactionId))).resolves.toMatchObject({ outcome: "issued" });
+    });
+
+    it("#6 #7 refuses prose agreements citing both SHAs, including a refusal", async () => {
+      const runId = await liveRun();
+      const before = await grantCount();
+      for (const details of [
+        `Pousser ${REPO} ${REF} de ${OLD} vers ${NEW} en force-with-lease.`,
+        `Ne pas pousser ${OLD} → ${NEW} sur ${REPO}.`,
+      ]) {
+        await expect(service().issue(claimsFor(runId), grantInput(await agreement({ details })))).rejects.toMatchObject({ status: 403 });
+      }
+      await expect(service().issue(claimsFor(runId), grantInput(await agreement({ details: "", reason: `Refusé : ne pas pousser ${OLD} ${NEW}` }))))
+        .rejects.toMatchObject({ status: 403 });
+      expect(await grantCount()).toBe(before);
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("#8 refuses a block with an extra field, a missing kind, a duplicated key or surrounding prose", async () => {
+      const runId = await liveRun();
+      const before = await grantCount();
+      const full = JSON.parse(block()) as Record<string, unknown>;
+      const { kind: _kind, ...withoutKind } = full;
+      for (const details of [
+        block({ note: "x" }),
+        JSON.stringify(withoutKind),
+        block().replace("}", `,"newSha":"${OTHER}"}`),
+        `Accord : ${block()}`,
+        "```json\n" + block() + "\n```",
+      ]) {
+        await expect(service().issue(claimsFor(runId), grantInput(await agreement({ details })))).rejects.toMatchObject({ status: 403 });
+      }
+      expect(await grantCount()).toBe(before);
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("#9 refuses two divergent blocks in the same agreement text", async () => {
+      const runId = await liveRun();
+      const before = await grantCount();
+      const twoInPrompt = await agreement({ prompt: `Variante : ${block({ newSha: OTHER })}` });
+      await expect(service().issue(claimsFor(runId), grantInput(twoInPrompt))).rejects.toMatchObject({ status: 403 });
+      const twoInAnswer = await agreement({ reason: block({ expectedOldSha: NEW, newSha: OLD }) });
+      await expect(service().issue(claimsFor(runId), grantInput(twoInAnswer))).rejects.toMatchObject({ status: 403 });
+      expect(await grantCount()).toBe(before);
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("accepts a pretty-printed block and compares SHAs and repository case-insensitively", async () => {
+      const runId = await liveRun();
+      const details = JSON.stringify({
+        kind: "push_grant", repository: REPO.toLowerCase(), ref: REF, mode: "force-with-lease",
+        expectedOldSha: OLD.toUpperCase(), newSha: NEW.toUpperCase(),
+      }, null, 2);
+      await expect(service().issue(claimsFor(runId), grantInput(await agreement({ details })))).resolves.toMatchObject({ outcome: "issued" });
+    });
+
+    it("keeps an agreement blocked after an unknown outcome, and reusable after a failure without external effect", async () => {
+      const runId = await liveRun();
+      const unknownAgreement = await agreement();
+      const grant = await service().issue(claimsFor(runId), grantInput(unknownAgreement));
+      forge.pushError = new PushGrantForgeError("push_failed", "connection reset");
+      await expect(service().consume(claimsFor(runId), grant.grantId, consumeInput())).resolves.toMatchObject({ status: "unknown" });
+      const [row] = await db.select().from(pushGrants).where(eq(pushGrants.id, grant.grantId));
+      expect(row!.outcome).toBe("unknown");
+      forge.readFails = false;
+      forge.pushError = null;
+      forge.head = OLD;
+      await expect(service().issue(claimsFor(runId), grantInput(unknownAgreement))).rejects.toMatchObject({ status: 409 });
+
+      const failedAgreement = await agreement();
+      const failed = await service().issue(claimsFor(runId), grantInput(failedAgreement));
+      forge.readFails = true;
+      await expect(service().consume(claimsFor(runId), failed.grantId, consumeInput())).resolves.toMatchObject({ outcome: "failed" });
+      forge.readFails = false;
+      await expect(service().issue(claimsFor(runId), grantInput(failedAgreement))).resolves.toMatchObject({ outcome: "issued" });
+    });
+
+    it("lets only one of two concurrent grant requests use the same agreement", async () => {
+      const runId = await liveRun();
+      const interactionId = await agreement();
+      const results = await Promise.allSettled([
+        service().issue(claimsFor(runId), grantInput(interactionId)),
+        service().issue(claimsFor(runId), grantInput(interactionId)),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.find((result) => result.status === "rejected")).toMatchObject({ reason: { status: 409 } });
+      const rows = await db.select().from(pushGrants).where(eq(pushGrants.interactionId, interactionId));
+      expect(rows).toHaveLength(1);
+    });
+  });
+
+  // ACC-4966 M2 — server-side repository allowlist and default-branch policy.
+  describe("repository and ref policy (ACC-4966 M2)", () => {
+    it("refuses a repository outside the company allowlist at issue, before any write", async () => {
+      const runId = await liveRun();
+      const repository = "AC-CREATION-AI/letsgo";
+      const interactionId = await agreement({ details: block({ repository }) });
+      const before = await grantCount();
+      await expect(service().issue(claimsFor(runId), grantInput(interactionId, { repository })))
+        .rejects.toMatchObject({ status: 422, details: { code: "repository_not_allowed" } });
+      expect(await grantCount()).toBe(before);
+    });
+
+    it("re-checks the allowlist at consumption and leaves the grant unspent when it was withdrawn", async () => {
+      const runId = await liveRun();
+      const repository = "AC-CREATION-AI/allowlist-probe";
+      const [entry] = await db.insert(pushGrantRepositories).values({ companyId, forge: "github", repository }).returning();
+      const grant = await service().issue(claimsFor(runId), grantInput(await agreement({ details: block({ repository }) }), { repository }));
+      await db.delete(pushGrantRepositories).where(eq(pushGrantRepositories.id, entry!.id));
+      await expect(service().consume(claimsFor(runId), grant.grantId, consumeInput({ repository })))
+        .rejects.toMatchObject({ status: 422, details: { code: "repository_not_allowed" } });
+      const [row] = await db.select().from(pushGrants).where(eq(pushGrants.id, grant.grantId));
+      expect(row!.consumedAt).toBeNull();
+      expect(row!.outcome).toBe("issued");
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("refuses another company's allowlist entry", async () => {
+      const runId = await liveRun();
+      const repository = "AC-CREATION-AI/other-company-repo";
+      await db.insert(pushGrantRepositories).values({ companyId: otherCompanyId, forge: "github", repository });
+      await expect(service().issue(claimsFor(runId), grantInput(await agreement({ details: block({ repository }) }), { repository })))
+        .rejects.toMatchObject({ status: 422 });
+    });
+
+    it("refuses force-with-lease on main, master and trunk, and accepts a fast-forward there", async () => {
+      const runId = await liveRun();
+      const before = await grantCount();
+      for (const ref of ["refs/heads/main", "refs/heads/master", "refs/heads/trunk"]) {
+        const interactionId = await agreement({ details: block({ ref }) });
+        await expect(service().issue(claimsFor(runId), grantInput(interactionId, { ref })))
+          .rejects.toMatchObject({ status: 422, details: { code: "protected_ref" } });
+      }
+      expect(await grantCount()).toBe(before);
+      const ref = "refs/heads/main";
+      const fastForward = await agreement({ details: block({ ref, mode: "fast-forward" }) });
+      await expect(service().issue(claimsFor(runId), grantInput(fastForward, { ref, mode: "fast-forward" })))
+        .resolves.toMatchObject({ outcome: "issued", mode: "fast-forward" });
+    });
+  });
+
+  // ACC-4966 B3 — the object source is confined to the instance workspace roots.
+  describe("push source confinement (ACC-4966 B3)", () => {
+    async function consumeFrom(cwd: string) {
+      const runId = await liveRun({ cwd });
+      const grant = await service().issue(claimsFor(runId), grantInput(await agreement()));
+      return service().consume(claimsFor(runId), grant.grantId, consumeInput());
+    }
+
+    it("refuses a workspace whose .git is a gitdir file", async () => {
+      const cwd = path.join(workspaceRoot, "gitdir-file");
+      await fs.mkdir(cwd, { recursive: true });
+      await fs.writeFile(path.join(cwd, ".git"), `gitdir: ${path.join(workspaceCwd, ".git")}\n`);
+      await expect(consumeFrom(cwd)).resolves.toMatchObject({ pushed: false, outcome: "failed", errorCode: "source_unavailable" });
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("refuses a workspace that borrows objects through objects/info/alternates", async () => {
+      const cwd = path.join(workspaceRoot, "alternates");
+      await fs.mkdir(path.join(cwd, ".git", "objects", "info"), { recursive: true });
+      await fs.writeFile(path.join(cwd, ".git", "objects", "info", "alternates"), "/elsewhere/objects\n");
+      await expect(consumeFrom(cwd)).resolves.toMatchObject({ pushed: false, outcome: "failed", errorCode: "source_unavailable" });
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("refuses a workspace outside the allowed roots, including through a symlink", async () => {
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-push-grant-outside-"));
+      try {
+        await fs.mkdir(path.join(outside, ".git", "objects", "info"), { recursive: true });
+        await expect(consumeFrom(outside)).resolves.toMatchObject({ errorCode: "source_unavailable" });
+        const link = path.join(workspaceRoot, "escape-link");
+        await fs.symlink(outside, link);
+        await expect(consumeFrom(link)).resolves.toMatchObject({ errorCode: "source_unavailable" });
+        expect(forge.pushes).toHaveLength(0);
+      } finally {
+        await fs.rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // ACC-4966 B4 — a consume replay is answered only to the same grant, agent and run.
+  describe("consume replay binding (ACC-4966 B4)", () => {
+    it("refuses a replay from another run of the same agent, then from another agent, without effect", async () => {
+      const runId = await liveRun();
+      const grant = await service().issue(claimsFor(runId), grantInput(await agreement()));
+      const input = consumeInput();
+      const first = await service().consume(claimsFor(runId), grant.grantId, input);
+      expect(first).toMatchObject({ pushed: true });
+      const sameAgentOtherRun = await liveRun();
+      await expect(service().consume(claimsFor(sameAgentOtherRun), grant.grantId, input))
+        .rejects.toMatchObject({ status: 409, message: "requestId was already used." });
+      await db.update(issues).set({ assigneeAgentId: otherAgentId }).where(eq(issues.id, issueId));
+      try {
+        const otherAgentRun = await liveRun({ agent: otherAgentId });
+        await expect(service().consume(claimsFor(otherAgentRun, otherAgentId), grant.grantId, input))
+          .rejects.toMatchObject({ status: 409, message: "requestId was already used." });
+      } finally {
+        await db.update(issues).set({ assigneeAgentId: agentId }).where(eq(issues.id, issueId));
+      }
+      expect(forge.pushes).toHaveLength(1);
+      const receipts = await db.select().from(pushGrantReceipts).where(eq(pushGrantReceipts.grantId, grant.grantId));
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({ agentId, runId });
+      expect(await service().consume(claimsFor(runId), grant.grantId, input)).toEqual(first);
+    });
+  });
+
   describe("HTTP routes", () => {
     const company = () => companyId;
     function app() {
       const instance = express();
       instance.use(express.json());
-      instance.use("/api", pushGrantRoutes(db, { forgeFor: () => forge }));
+      instance.use("/api", pushGrantRoutes(db, { forgeFor: () => forge, workspaceRoots: () => [workspaceRoot] }));
       instance.use(errorHandler);
       return instance;
     }
