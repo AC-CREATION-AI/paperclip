@@ -93,10 +93,15 @@ function agreementUsed() {
 }
 
 /**
- * Parse the structured agreement (ACC-4966 H1.a). The details must be one JSON
- * object and nothing else, with each field exactly once, and the agreement text
- * as a whole (prompt, details, human answer) must carry exactly one block.
- * Returns null when the agreement is not a valid structured push agreement.
+ * Parse the structured agreement (ACC-4966 H1.a, ACC-4974 N1). The details must
+ * be exactly the canonical form `JSON.stringify({ kind, repository, ref, mode,
+ * expectedOldSha, newSha })`: compact, fields in this fixed order, no escape a
+ * human reader could not see. This rules out duplicated keys, including keys
+ * spelled with `\uXXXX` escapes that `JSON.parse` would silently decode and
+ * keep the last of: what the human read is what the server applies. The
+ * agreement text as a whole (prompt, details, human answer) must carry exactly
+ * one block. Returns null when the agreement is not a valid structured push
+ * agreement.
  */
 export function parsePushGrantAgreement(input: { prompt: string; details: string; answer: string }) {
   const details = input.details.trim();
@@ -104,10 +109,6 @@ export function parsePushGrantAgreement(input: { prompt: string; details: string
     .reduce((count, part) => count + (part.match(AGREEMENT_MARKER_RE)?.length ?? 0), 0);
   if (markers !== 1) return null;
   if (!details.startsWith("{") || !details.endsWith("}")) return null;
-  // JSON.parse keeps the last duplicate key: refuse duplicates instead of guessing.
-  for (const field of AGREEMENT_FIELDS) {
-    if ((details.match(new RegExp(`"${field}"\\s*:`, "g"))?.length ?? 0) !== 1) return null;
-  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(details);
@@ -115,7 +116,10 @@ export function parsePushGrantAgreement(input: { prompt: string; details: string
     return null;
   }
   const result = pushGrantAgreementSchema.safeParse(parsed);
-  return result.success ? result.data : null;
+  if (!result.success) return null;
+  const agreed = result.data;
+  const canonical = JSON.stringify(Object.fromEntries(AGREEMENT_FIELDS.map((field) => [field, agreed[field]])));
+  return details === canonical ? agreed : null;
 }
 
 function sameTuple(agreed: PushTuple, requested: PushTuple) {

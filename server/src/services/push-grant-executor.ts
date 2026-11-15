@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -77,7 +78,8 @@ function isInside(child: string, parent: string) {
  * Fails closed with `source_unavailable` when the workspace resolves outside
  * the instance's workspace roots, when `.git` is not a plain directory (a
  * `gitdir:` file or a symlink pointing at another repository), or when the
- * object store borrows objects from elsewhere (`objects/info/alternates`).
+ * object store borrows objects from elsewhere: `objects/info/alternates`, a
+ * `commondir` file, or a symlink anywhere under `.git/objects` (ACC-4974 N2).
  * Returns the resolved workspace path to fetch from.
  */
 export async function assertConfinedPushSource(sourceCwd: string, allowedRoots: readonly string[]): Promise<string> {
@@ -108,10 +110,39 @@ export async function assertConfinedPushSource(sourceCwd: string, allowedRoots: 
     return refuse("Run workspace is not a git repository");
   }
   if (!gitStat.isDirectory()) refuse("Run workspace .git must be a directory, not a gitdir link");
-  const alternates = path.join(gitDir, "objects", "info", "alternates");
+  // A linked worktree reads its object store through `commondir` (ACC-4974 N2).
+  const hasCommondir = await fs.lstat(path.join(gitDir, "commondir")).then(() => true, () => false);
+  if (hasCommondir) refuse("Run workspace shares its object store through commondir");
+  const objectsDir = path.join(gitDir, "objects");
+  let objectsStat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    objectsStat = await fs.lstat(objectsDir);
+  } catch {
+    return refuse("Run workspace has no object store");
+  }
+  if (!objectsStat.isDirectory()) refuse("Run workspace .git/objects must be a directory, not a link");
+  // Any symlink inside the object store (objects/info, objects/pack, a loose
+  // object directory or file) may borrow objects from another repository.
+  if (await containsSymlink(objectsDir)) refuse("Run workspace object store links outside itself");
+  const alternates = path.join(objectsDir, "info", "alternates");
   const hasAlternates = await fs.lstat(alternates).then(() => true, () => false);
   if (hasAlternates) refuse("Run workspace borrows objects from another repository");
   return resolved;
+}
+
+/** True when `dir` (a real directory) contains a symbolic link at any depth. Fails closed on read errors. */
+async function containsSymlink(dir: string): Promise<boolean> {
+  let entries: Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return true;
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) return true;
+    if (entry.isDirectory() && await containsSymlink(path.join(dir, entry.name))) return true;
+  }
+  return false;
 }
 
 type ExecGit = (args: string[], options: { cwd?: string; env: Record<string, string> }) => Promise<{ stdout: string }>;
