@@ -274,6 +274,14 @@ export const putToolConnectionInstallsSchema = z.object({
     targetId: z.string().trim().min(1).max(200),
     bindAppProfile: z.literal(false).optional(),
   })).max(1000),
+  /**
+   * Install-set revision the caller read (GET .../installs `revision`). The
+   * server compares it with the connection's current revision under the
+   * connection lock and rejects a stale value with 409 without mutating
+   * (ACC-4941). Required on the REST route so no client can blindly replace
+   * installs another writer changed.
+   */
+  expectedRevision: z.number().int().nonnegative(),
 }).strict();
 
 export type PutToolConnectionInstalls = z.infer<typeof putToolConnectionInstallsSchema>;

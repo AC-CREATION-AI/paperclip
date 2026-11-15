@@ -1,6 +1,6 @@
 {
-  "id": "dce41524-29a3-4552-ba5d-f0abefbf1ea1",
-  "prevId": "27c9008c-60e3-449b-9630-9e4977fad444",
+  "id": "36228f6e-6bb6-43bb-a544-a6facdfddc5d",
+  "prevId": "52cf22f3-3bd9-4b0f-8d23-b422bb0d2540",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -19052,6 +19052,98 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.company_skill_mutation_receipts": {
+      "name": "company_skill_mutation_receipts",
+      "schema": "",
+      "columns": {
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fingerprint": {
+          "name": "fingerprint",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "skill_id": {
+          "name": "skill_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version_id": {
+          "name": "version_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "response": {
+          "name": "response",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "company_skill_mutation_receipts_key_idx": {
+          "name": "company_skill_mutation_receipts_key_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "company_skill_mutation_receipts_company_id_companies_id_fk": {
+          "name": "company_skill_mutation_receipts_company_id_companies_id_fk",
+          "tableFrom": "company_skill_mutation_receipts",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.company_skill_repository_snapshots": {
       "name": "company_skill_repository_snapshots",
       "schema": "",
@@ -34070,7 +34162,7 @@
             }
           ],
           "isUnique": false,
-          "where": "\"heartbeat_runs\".\"runtime_mode\" = 'native' AND \"heartbeat_runs\".\"status\" = 'cancelled'\n        AND \"heartbeat_runs\".\"runner_profile_json\"->'nativeWorkspaceSync'->>'state' = 'prepared'\n        AND \"heartbeat_runs\".\"result_json\"->'nativeCancellation'->>'dispatchState' = 'acknowledged'\n        AND (\"heartbeat_runs\".\"result_json\"->'workspaceRestoreRecovery'->>'schema' = 'paperclip.workspace-restore-recovery.v1'\n          AND \"heartbeat_runs\".\"result_json\"->>'workspaceRestoreFailure' IN ('restore_permission_denied', 'restore_lock_timeout', 'restore_unsafe_archive', 'restore_failed')) IS NOT TRUE",
+          "where": "\"heartbeat_runs\".\"runtime_mode\" = 'native' AND \"heartbeat_runs\".\"status\" = 'cancelled'\n        AND \"heartbeat_runs\".\"runner_profile_json\"->'nativeWorkspaceSync'->>'state' = 'prepared'\n        AND \"heartbeat_runs\".\"result_json\"->'nativeCancellation'->>'dispatchState' = 'acknowledged'\n        AND (\"heartbeat_runs\".\"result_json\"->'workspaceRestoreRecovery'->>'schema' = 'paperclip.workspace-restore-recovery.v1'\n          AND \"heartbeat_runs\".\"result_json\"->>'workspaceRestoreFailure' IN ('restore_permission_denied', 'restore_lock_timeout', 'restore_unsafe_archive', 'restore_invalid_metadata', 'restore_failed')) IS NOT TRUE",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -37010,6 +37102,15 @@
           "columns": [
             "issue_id",
             "author_user_id",
+            "client_request_id"
+          ]
+        },
+        "issue_comments_agent_client_request_uq": {
+          "name": "issue_comments_agent_client_request_uq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "issue_id",
+            "author_agent_id",
             "client_request_id"
           ]
         },
@@ -51482,6 +51583,195 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.sandbox_creation_operations": {
+      "name": "sandbox_creation_operations",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "original_environment_id": {
+          "name": "original_environment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_key": {
+          "name": "request_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'run'"
+        },
+        "issue_id": {
+          "name": "issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "execution_workspace_id": {
+          "name": "execution_workspace_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "plugin_id": {
+          "name": "plugin_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "driver_key": {
+          "name": "driver_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "config": {
+          "name": "config",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lease_id": {
+          "name": "lease_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "sandbox_creation_operations_pending_deadline_idx": {
+          "name": "sandbox_creation_operations_pending_deadline_idx",
+          "columns": [
+            {
+              "expression": "next_attempt_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"sandbox_creation_operations\".\"state\" = 'pending'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "sandbox_creation_operations_owner_idx": {
+          "name": "sandbox_creation_operations_owner_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "original_environment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "request_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "sandbox_creation_operations_environment_id_environments_id_fk": {
+          "name": "sandbox_creation_operations_environment_id_environments_id_fk",
+          "tableFrom": "sandbox_creation_operations",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.secret_access_events": {
       "name": "secret_access_events",
       "schema": "",
@@ -55584,6 +55874,88 @@
           ],
           "columnsTo": [
             "company_id",
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.tool_connection_install_revisions": {
+      "name": "tool_connection_install_revisions",
+      "schema": "",
+      "columns": {
+        "connection_id": {
+          "name": "connection_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision": {
+          "name": "revision",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "tool_connection_install_revisions_company_idx": {
+          "name": "tool_connection_install_revisions_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "tool_connection_install_revisions_connection_id_tool_connections_id_fk": {
+          "name": "tool_connection_install_revisions_connection_id_tool_connections_id_fk",
+          "tableFrom": "tool_connection_install_revisions",
+          "tableTo": "tool_connections",
+          "columnsFrom": [
+            "connection_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "tool_connection_install_revisions_company_id_companies_id_fk": {
+          "name": "tool_connection_install_revisions_company_id_companies_id_fk",
+          "tableFrom": "tool_connection_install_revisions",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
             "id"
           ],
           "onDelete": "cascade",

@@ -5,7 +5,6 @@ import type {
   ConfigureRailwaySsh,
   RailwaySshSetup,
   ToolConnection,
-  ToolConnectionInstall,
   ToolConnectionInstallSnapshot,
   ToolConnectionRemovalSummary,
   ConnectToolAppResult,
@@ -353,16 +352,19 @@ export const toolsApi = {
   // tools in their runtime context. `installed ⊆ permitted`; the server
   // auto-extends access (adds profile bindings) for any newly-installed target.
   getConnectionInstalls: (connectionId: string) =>
-    api.get<{ connectionId: string; installs: ToolConnectionInstall[] }>(
+    api.get<ToolConnectionInstallSnapshot>(
       `/tool-connections/${connectionId}/installs`,
     ),
+  // `expectedRevision` is the `revision` the caller read; the server answers
+  // 409 without changing anything when another writer got there first (ACC-4941).
   putConnectionInstalls: (
     connectionId: string,
     installs: Array<{ targetType: "company" | "agent"; targetId: string }>,
+    expectedRevision: number,
   ) =>
     api.put<ToolConnectionInstallSnapshot>(
       `/tool-connections/${connectionId}/installs`,
-      { installs },
+      { installs, expectedRevision },
     ),
   // --- Identity grants (PAP-17835): who a connection acts as. The response
   // carries server-computed capabilities and the audience member directory, so

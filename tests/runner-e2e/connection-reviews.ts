@@ -77,7 +77,10 @@ export async function setupConnectionReview(input: {
     const installed = await api.request.put(
       `/api/tool-connections/${connection.id}/installs`,
       {
-        data: { installs: [{ targetType: "agent", targetId: input.agentId }] },
+        data: {
+          installs: [{ targetType: "agent", targetId: input.agentId }],
+          expectedRevision: (await api.get<{ revision: number }>(`/api/tool-connections/${connection.id}/installs`)).revision,
+        },
       },
     );
     expect(installed.ok()).toBe(true);

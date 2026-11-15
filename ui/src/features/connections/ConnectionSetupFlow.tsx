@@ -1403,7 +1403,8 @@ function StandardConnectionSetupFlow({
       ? { onAll: true, agentIds: new Set<string>() }
       : { onAll: false, agentIds: installAgentIds };
     const desired = installPayload(selectedCompanyId!, installState);
-    await toolsApi.putConnectionInstalls(connectionId, desired);
+    const { revision } = await toolsApi.getConnectionInstalls(connectionId);
+    await toolsApi.putConnectionInstalls(connectionId, desired, revision);
   };
 
   const effectiveGrantKind = fixedGrantKind ?? grantKind;

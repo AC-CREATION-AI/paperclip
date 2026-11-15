@@ -27,7 +27,7 @@ export function planToolChanges(snapshot: AgentConfigurationSnapshot, document: 
       const installs = current.installs.filter(row => !(row.targetType === "agent" && row.targetId === agentId))
         .map(({ targetType, targetId }) => ({ targetType, targetId }));
       if (installed) installs.push({ targetType: "agent", targetId: agentId });
-      return toolsApi.putConnectionInstalls(connection.id, installs);
+      return toolsApi.putConnectionInstalls(connection.id, installs, current.revision);
     });
   }
   for (const row of next.profiles) {

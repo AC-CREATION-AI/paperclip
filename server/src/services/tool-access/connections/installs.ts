@@ -5,10 +5,34 @@ import { lockToolAssignmentAgents, lockToolConnectionRuntimeInputs } from "../as
 import type { ActorInfo } from "../types.js";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { toolAccessAuditEvents, toolConnectionInstalls, toolConnections, toolProfileBindings, toolProfileEntries, toolProfiles } from "@paperclipai/db";
+import { toolAccessAuditEvents, toolConnectionInstallRevisions, toolConnectionInstalls, toolConnections, toolProfileBindings, toolProfileEntries, toolProfiles } from "@paperclipai/db";
 import type { ToolConnection, ToolConnectionInstall, ToolConnectionInstallSnapshot, PutToolConnectionInstalls } from "@paperclipai/shared";
-import { unprocessable } from "../../../errors.js";
+import { conflict, unprocessable } from "../../../errors.js";
 import { logActivity } from "../../activity-log.js";
+
+/**
+ * Service input for an install replacement. The REST schema requires
+ * `expectedRevision`; internal callers that already hold their own business
+ * precondition may omit it. Every writer still advances the revision through
+ * the database trigger, so later versioned writers detect them (ACC-4941).
+ */
+export type PutConnectionInstallsInput = Omit<PutToolConnectionInstalls, "expectedRevision"> & { expectedRevision?: number };
+
+/** Current install-set revision; 0 until the first install write. */
+export async function readConnectionInstallsRevision(client: Pick<Db, "select">, connectionId: string): Promise<number> {
+  const [row] = await client.select({ revision: toolConnectionInstallRevisions.revision })
+    .from(toolConnectionInstallRevisions)
+    .where(eq(toolConnectionInstallRevisions.connectionId, connectionId));
+  return row?.revision ?? 0;
+}
+
+/** Revisions of every connection of a company, read BEFORE their installs. */
+export async function readConnectionInstallsRevisions(client: Pick<Db, "select">, companyId: string): Promise<Map<string, number>> {
+  const rows = await client.select({ connectionId: toolConnectionInstallRevisions.connectionId, revision: toolConnectionInstallRevisions.revision })
+    .from(toolConnectionInstallRevisions)
+    .where(eq(toolConnectionInstallRevisions.companyId, companyId));
+  return new Map(rows.map((row) => [row.connectionId, row.revision]));
+}
 
 type InstallDependencies = {
   now: () => Date;
@@ -101,6 +125,22 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
     return rows.map(toConnectionInstall);
   }
 
+  /**
+   * Installs plus the revision a writer must echo back. The revision is read
+   * BEFORE the installs: a commit in between pairs an older revision with
+   * newer installs, so the follow-up PUT is rejected (safe), never the
+   * reverse (newer revision paired with stale installs).
+   */
+  async function getConnectionInstallSnapshot(
+    connectionId: string,
+    companyId?: string,
+  ): Promise<ToolConnectionInstallSnapshot> {
+    const connection = await getConnectionRow(connectionId, companyId);
+    const revision = await readConnectionInstallsRevision(db, connection.id);
+    const installs = await listConnectionInstalls(connection.id, connection.companyId);
+    return { connectionId: connection.id, installs, revision };
+  }
+
   async function resolveInstalledConnectionsForAgent(
     companyId: string,
     agentId: string,
@@ -143,9 +183,10 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
   return {
     resolveInstalledConnectionsForAgent,
     listConnectionInstalls,
+    getConnectionInstallSnapshot,
     putConnectionInstalls: async (
       connectionId: string,
-      input: PutToolConnectionInstalls,
+      input: PutConnectionInstallsInput,
       actor?: ActorInfo,
     ): Promise<ToolConnectionInstallSnapshot> => {
       await actor?.managementContext?.reauthorize();
@@ -177,8 +218,28 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
         targetId: string;
         profileId: string;
       }> = [];
+      let finalRevision = 0;
       await db.transaction(async (tx) => {
         await lockToolConnectionRuntimeInputs(tx, connection.companyId, connection.id);
+        // Compare-and-write (ACC-4941). Materialize then lock the revision row:
+        // every install writer bumps it through a statement trigger, so this
+        // lock serializes with all of them, whatever the path or process. A
+        // stale expectedRevision is rejected here, before any mutation.
+        await tx.insert(toolConnectionInstallRevisions)
+          .values({ connectionId: connection.id, companyId: connection.companyId, revision: 0 })
+          .onConflictDoNothing();
+        const [current] = await tx.select({ revision: toolConnectionInstallRevisions.revision })
+          .from(toolConnectionInstallRevisions)
+          .where(eq(toolConnectionInstallRevisions.connectionId, connection.id))
+          .for("update");
+        if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
+          throw conflict("Tool connection installs changed; reload before saving", {
+            code: "installs_revision_conflict",
+            connectionId: connection.id,
+            expectedRevision: input.expectedRevision,
+            currentRevision: current.revision,
+          });
+        }
         const [lockedConnection] = await tx.select({ transport: toolConnections.transport, config: toolConnections.config })
           .from(toolConnections).where(and(eq(toolConnections.companyId, connection.companyId), eq(toolConnections.id, connection.id)));
         const onDemand = lockedConnection.transport === "mcp_remote"
@@ -362,6 +423,7 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
             },
           });
         }
+        finalRevision = await readConnectionInstallsRevision(tx, connection.id);
       });
       for (const extension of accessExtensions) {
         await logActivity(db, {
@@ -380,6 +442,7 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
           connection.id,
           connection.companyId,
         ),
+        revision: finalRevision,
       };
     }
   };

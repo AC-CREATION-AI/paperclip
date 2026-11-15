@@ -297,7 +297,9 @@ function StandardAppDetail({ renderActions, renderAgentSettings, renderConnectio
       reviewed?: Set<string>;
     }) => {
       return connection?.connectionPurpose === "ai"
-      ? toolsApi.putConnectionInstalls(connectionId, next.access.mode === "all" ? [{ targetType: "company", targetId: selectedCompanyId! }] : [...next.access.agentIds].map(targetId => ({ targetType: "agent" as const, targetId })))
+      ? toolsApi.putConnectionInstalls(connectionId, next.access.mode === "all" ? [{ targetType: "company", targetId: selectedCompanyId! }] : [...next.access.agentIds].map(targetId => ({ targetType: "agent" as const, targetId })),
+        // Same source as `install` above, so the revision matches what the user edited.
+        installsQuery.data ? installsQuery.data.revision : connection?.installsRevision ?? 0)
       : toolsApi.finishApp(selectedCompanyId!, connectionId, {
         enabledCatalogEntryIds: [...next.enabled],
         askFirstCatalogEntryIds: [...next.askFirst].filter((id) => next.enabled.has(id)),
@@ -316,12 +318,15 @@ function StandardAppDetail({ renderActions, renderAgentSettings, renderConnectio
       queryClient.invalidateQueries({ queryKey: queryKeys.tools.connections(selectedCompanyId!) });
       queryClient.invalidateQueries({ queryKey: queryKeys.apps.attention(selectedCompanyId!) });
     },
-    onError: (error) =>
+    onError: (error) => {
+      // A 409 means installs changed elsewhere: reload them and their revision.
+      void installsQuery.refetch();
       pushToast({
         title: "Couldn't save that",
         body: error instanceof Error ? error.message : "Please try again.",
         tone: "error",
-      }),
+      });
+    },
     onSettled: () => setPending(false),
   });
 
