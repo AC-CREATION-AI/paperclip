@@ -50,10 +50,12 @@ function createRouteApp(db: Db) {
 describe("transport-only install input", () => {
   it("accepts only an explicit false app-profile binding option", () => {
     const install = { targetType: "agent", targetId: randomUUID() };
-    expect(putToolConnectionInstallsSchema.parse({ installs: [install] }).installs).toEqual([install]);
-    expect(putToolConnectionInstallsSchema.parse({ installs: [{ ...install, bindAppProfile: false }] }).installs)
+    expect(putToolConnectionInstallsSchema.parse({ installs: [install], expectedRevision: 0 }).installs).toEqual([install]);
+    expect(putToolConnectionInstallsSchema.parse({ installs: [{ ...install, bindAppProfile: false }], expectedRevision: 0 }).installs)
       .toEqual([{ ...install, bindAppProfile: false }]);
-    expect(putToolConnectionInstallsSchema.safeParse({ installs: [{ ...install, bindAppProfile: true }] }).success).toBe(false);
+    expect(putToolConnectionInstallsSchema.safeParse({ installs: [{ ...install, bindAppProfile: true }], expectedRevision: 0 }).success).toBe(false);
+    // ACC-4941: the REST contract requires the revision the caller read.
+    expect(putToolConnectionInstallsSchema.safeParse({ installs: [install] }).success).toBe(false);
   });
 });
 
@@ -109,9 +111,13 @@ describeDatabase("GitHub transport-only connection installs", () => {
     })));
     const service = toolAccessService(db);
     const app = createRouteApp(db);
-    const put = (installs: Install[]) => request(app)
-      .put(`/api/tool-connections/${connection.id}/installs`).send({ installs })
-      .expect(response => expect(response.status, JSON.stringify(response.body)).toBe(200));
+    const put = async (installs: Install[]) => {
+      // Compare-and-write (ACC-4941): read the current revision, then echo it.
+      const current = await request(app).get(`/api/tool-connections/${connection.id}/installs`).expect(200);
+      return request(app)
+        .put(`/api/tool-connections/${connection.id}/installs`).send({ installs, expectedRevision: current.body.revision })
+        .expect(response => expect(response.status, JSON.stringify(response.body)).toBe(200));
+    };
     const bindings = () => db.select().from(toolProfileBindings).where(and(
       eq(toolProfileBindings.companyId, companyId), eq(toolProfileBindings.profileId, appProfile.id),
     )).orderBy(toolProfileBindings.targetId);
@@ -294,11 +300,12 @@ describeDatabase("GitHub transport-only connection installs", () => {
     const spy = vi.spyOn(accessModule, "accessService").mockReturnValue({ ...access, decide });
     try {
       const app = createRouteApp(db);
-      await request(app).put(`/api/tool-connections/${f.connection.id}/installs`)
-        .send({ installs: f.targets }).expect(200);
+      const { revision } = await f.service.getConnectionInstallSnapshot(f.connection.id);
+      const saved = await request(app).put(`/api/tool-connections/${f.connection.id}/installs`)
+        .send({ installs: f.targets, expectedRevision: revision }).expect(200);
       expect(decide).not.toHaveBeenCalled();
       await request(app).put(`/api/tool-connections/${f.connection.id}/installs`)
-        .send({ installs: f.targets.map((install, index) => index === 0 ? { ...install, bindAppProfile: false } : install) })
+        .send({ installs: f.targets.map((install, index) => index === 0 ? { ...install, bindAppProfile: false } : install), expectedRevision: saved.body.revision })
         .expect(403);
       expect(decide).toHaveBeenCalledWith(expect.objectContaining({
         action: "agent_config:update",

@@ -439,7 +439,10 @@ async function finishAgentOnlySetup(request, config, companyId, connectionId, ca
     config,
     "PUT",
     `/api/tool-connections/${connectionId}/installs`,
-    { installs: [{ targetType: "agent", targetId: agentId }] },
+    {
+      installs: [{ targetType: "agent", targetId: agentId }],
+      expectedRevision: (await apiJson(request, config, "GET", `/api/tool-connections/${connectionId}/installs`, undefined, "D.agent-install")).revision,
+    },
     "D.agent-install",
   );
   return facts;

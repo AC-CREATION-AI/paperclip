@@ -330,6 +330,7 @@ test("store setup and task connection intent share one fake provider through con
       await request.put(`/api/tool-connections/${connectionId}/installs`, {
         data: {
           installs: [{ targetType: "agent", targetId: holder.id }],
+          expectedRevision: (await json<{ revision: number }>(await request.get(`/api/tool-connections/${connectionId}/installs`))).revision,
         },
       }),
     );

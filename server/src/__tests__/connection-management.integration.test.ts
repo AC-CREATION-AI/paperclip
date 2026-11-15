@@ -27,6 +27,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { PaperclipRunnerToolAuthority } from "../services/native-runtime/paperclip-runner-tool-authority.js";
 import type { AuthorizationActor } from "../services/authorization.js";
 import type { ConnectionManagementResource } from "../services/connection-management-policy.js";
+import { readConnectionInstallsRevision } from "../services/tool-access/connections/installs.js";
 
 vi.mock("../services/agent-lifecycle-driver.js", () => ({
   createLifecycleDriver: () => ({ requiredPluginIds: async () => [], runPlugin: async () => "complete", runHost: async () => "complete" }),
@@ -243,11 +244,12 @@ describe("connection management with production default agents", () => {
     expect(actual.get("viewer")!.body.capabilities).toMatchObject({ canConfigure: false, canManageAgentInstalls: false, editableAgentIds: [] });
     expect(actual.get("inactive")!.status).toBe(404);
     const installs = [{ targetType: "agent", targetId: candidateIds[0] }, { targetType: "agent", targetId: candidateIds[1] }];
-    const beforeRevoke = await request("member", "PUT", { installs });
+    const revision = await readConnectionInstallsRevision(server.db, connection.id);
+    const beforeRevoke = await request("member", "PUT", { installs, expectedRevision: revision });
     expect(beforeRevoke, JSON.stringify(beforeRevoke)).toMatchObject({ status: 200 });
     await server.db.delete(principalPermissionGrants).where(and(eq(principalPermissionGrants.companyId, f.companyId), eq(principalPermissionGrants.principalId, users.member)));
     expect(await request("member")).toMatchObject({ status: 200, body: { capabilities: { editableAgentIds: [], canManageAgentInstalls: false } } });
-    expect(await request("member", "PUT", { installs: [{ targetType: "agent", targetId: candidateIds[0] }] })).toMatchObject({ status: 403 });
+    expect(await request("member", "PUT", { installs: [{ targetType: "agent", targetId: candidateIds[0] }], expectedRevision: beforeRevoke.body.revision })).toMatchObject({ status: 403 });
     const savedInstalls = await server.db.select().from(toolConnectionInstalls).where(eq(toolConnectionInstalls.connectionId, connection.id));
     expect(savedInstalls.map(install => install.targetId)).toEqual(expect.arrayContaining(candidateIds.slice(0, 2)));
     expect(savedInstalls).toHaveLength(2);
@@ -279,7 +281,7 @@ describe("connection management with production default agents", () => {
     const profile = await f.request("POST", `/companies/${f.companyId}/tools/profiles`, { profileKey: "large-catalog", name: "Large catalog", entries: [{ selectorType: "connection", connectionId: connection.body.id }] });
     expect(profile).toMatchObject({ status: 201 });
     expect(await f.request("POST", `/companies/${f.companyId}/tools/profiles/${profile.body.id}/bind`, { targetType: "agent", targetId: f.agentId })).toMatchObject({ status: 201 });
-    expect(await f.request("PUT", `/tool-connections/${connection.body.id}/installs`, { installs: [{ targetType: "agent", targetId: f.agentId }] })).toMatchObject({ status: 200 });
+    expect(await f.request("PUT", `/tool-connections/${connection.body.id}/installs`, { installs: [{ targetType: "agent", targetId: f.agentId }], expectedRevision: (await f.request("GET", `/tool-connections/${connection.body.id}/installs`)).body.revision })).toMatchObject({ status: 200 });
     const module = await import("../services/connection-management.js");
     const original = connectionManagementService;
     let connectionChecks = 0;
@@ -326,7 +328,7 @@ describe("connection management with production default agents", () => {
     expect(await f.request("GET", `/tool-profiles/${profileIds[1]}/new-tools`)).toMatchObject({ status: 200, body: { tools: [expect.objectContaining({ connectionName: "Private profile account", description: "Private tool metadata" })] } });
     const effectivePath = `/companies/${f.companyId}/tools/profiles/effective/agents/${f.agentId}`;
     expect((await f.request("GET", effectivePath)).body.allowedTools.some((tool: { toolName: string }) => tool.toolName === "private_tool")).toBe(true);
-    expect(await f.request("PUT", `/tool-connections/${second.body.id}/installs`, { installs: [{ targetType: "agent", targetId: f.agentId }] })).toMatchObject({ status: 200 });
+    expect(await f.request("PUT", `/tool-connections/${second.body.id}/installs`, { installs: [{ targetType: "agent", targetId: f.agentId }], expectedRevision: (await f.request("GET", `/tool-connections/${second.body.id}/installs`)).body.revision })).toMatchObject({ status: 200 });
     await server.db.update(toolConnections).set({ credentialPolicy: "per_user", createdByUserId: randomUUID() }).where(eq(toolConnections.id, second.body.id));
     for (const token of [f.key.token, f.jwt]) {
       expect(await f.request("GET", `/tool-profiles/${profileIds[1]}/new-tools`, undefined, token)).toMatchObject({ status: 403 });

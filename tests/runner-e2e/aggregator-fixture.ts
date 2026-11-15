@@ -50,7 +50,10 @@ export async function setupAggregatorFixture(
     );
     const installed = await api.request.put(
       `/api/tool-connections/${connected.connectionId}/installs`,
-      { data: { installs: requireAccessApproval ? [] : [{ targetType: "agent", targetId: agentId }] } },
+      { data: {
+        installs: requireAccessApproval ? [] : [{ targetType: "agent", targetId: agentId }],
+        expectedRevision: (await api.get<{ revision: number }>(`/api/tool-connections/${connected.connectionId}/installs`)).revision,
+      } },
     );
     if (!installed.ok())
       throw new Error("Could not install the aggregator fixture");
