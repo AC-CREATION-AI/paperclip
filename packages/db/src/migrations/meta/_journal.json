@@ -2927,6 +2927,13 @@
       "when": 1793400383797,
       "tag": "0419_slippery_impossible_man",
       "breakpoints": true
+    },
+    {
+      "idx": 420,
+      "version": "7",
+      "when": 1794751810366,
+      "tag": "0420_square_meltdown",
+      "breakpoints": true
     }
   ]
 }
