@@ -126,6 +126,7 @@
               "api/goals-and-projects",
               "api/costs",
               "api/secrets",
+              "api/push-grants",
               "api/activity",
               "api/dashboard"
             ]

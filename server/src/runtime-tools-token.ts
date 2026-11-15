@@ -6,13 +6,21 @@ export interface RuntimeToolsTokenClaims {
   company_id: string;
   run_id: string;
   responsible_user_id: string;
-  scope: "connection_intents" | "github_credentials";
+  scope: "connection_intents" | "github_credentials" | "push_grant";
   iat: number;
   exp: number;
   instance_id: string;
 }
 
 const TOKEN_TTL_SECONDS = 60 * 60;
+/** Push authority capabilities are deliberately short-lived (ACC-4931). */
+export const PUSH_GRANT_TOKEN_TTL_SECONDS = 120;
+
+function ttlSeconds(scope: RuntimeToolsTokenClaims["scope"] | undefined) {
+  if (scope === "github_credentials") return 30 * 24 * 60 * 60;
+  if (scope === "push_grant") return PUSH_GRANT_TOKEN_TTL_SECONDS;
+  return TOKEN_TTL_SECONDS;
+}
 
 function secret() {
   return process.env.PAPERCLIP_AGENT_JWT_SECRET?.trim()
@@ -57,7 +65,7 @@ export function createRuntimeToolsToken(input: {
     scope: input.scope ?? "connection_intents",
     iat: now,
     // Broker tokens remain scoped to a live run, which is rechecked on every use.
-    exp: now + (input.scope === "github_credentials" ? 30 * 24 * 60 * 60 : TOKEN_TTL_SECONDS),
+    exp: now + ttlSeconds(input.scope),
     instance_id: instanceId,
   };
   const signingInput = `${encode({ alg: "HS256", typ: "JWT" })}.${encode(claims)}`;

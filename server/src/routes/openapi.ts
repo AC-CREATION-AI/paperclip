@@ -312,6 +312,8 @@ import {
   connectionRequestInputSchema,
   connectionsSearchInputSchema,
   declineConnectionIntentSchema,
+  createPushGrantInputSchema,
+  consumePushGrantInputSchema,
   startClaudeSetupTokenSessionRequestSchema,
   submitBrowserCodeRequestSchema,
   claudeSetupTokenSessionResponseSchema,
@@ -1365,6 +1367,8 @@ const RUNTIME_TOOLS_OPERATIONS = new Set([
   "POST /mcp/runtime-tools",
   "POST /runtime-tools/connections/search",
   "POST /runtime-tools/connections/request",
+  "POST /api/companies/{companyId}/push-grants",
+  "POST /api/companies/{companyId}/push-grants/{grantId}/consume",
 ]);
 
 const PUBLIC_OPERATIONS = new Set([
@@ -11128,6 +11132,43 @@ registerCurrentRoute({
     params: z.record(z.string(), z.unknown()).optional(),
   }),
   responses: { 200: r.ok(), 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/push-grants",
+  tags: ["push-grants"],
+  summary:
+    "Issue a ≤120 s push grant from an accepted human-only confirmation after the server reads the lease on the forge; requires a push_grant run capability, browser sessions are rejected",
+  body: createPushGrantInputSchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+    503: { description: "The forge could not confirm the lease; refused (fail closed)" },
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/push-grants/{grantId}/consume",
+  tags: ["push-grants"],
+  summary:
+    "Atomically consume a push grant once and publish its exact lease-protected update; replays return the stored receipt",
+  body: consumePushGrantInputSchema,
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    410: { description: "Push grant expired" },
+  },
 });
 
 registerCurrentRoute({

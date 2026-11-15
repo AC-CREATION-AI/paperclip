@@ -164,6 +164,7 @@ import {
   connectionIntentBoardRoutes,
   runtimeConnectionIntentRoutes,
 } from "./routes/connection-intents.js";
+import { pushGrantRoutes } from "./routes/push-grants.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { managedAgentProfileRoutes } from "./routes/managed-agent-profiles.js";
 import { remoteAgentProfileRoutes } from "./routes/remote-agent-profiles.js";
@@ -543,6 +544,9 @@ export async function createApp(
   // must be reachable by remote adapters that intentionally do not receive an
   // agent API key. Every request revalidates the active heartbeat row.
   app.use(runtimeConnectionIntentRoutes(db));
+  // Push authority (ACC-4931): run-bound push_grant capability only, never a
+  // board session or agent key. Default deny; nothing is announced to runs yet.
+  app.use("/api", pushGrantRoutes(db));
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
   let lifecyclePluginsReady = false;

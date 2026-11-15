@@ -273,3 +273,6 @@ export { workflows } from "./workflows.js";
 export { userWorkspacePreferences } from "./user_workspace_preferences.js";
 
 export { issueThreadInteractionIdempotencyKeys } from "./issue_thread_interaction_idempotency_keys.js";
+export { pushGrants } from "./push_grants.js";
+export { pushGrantReceipts } from "./push_grant_receipts.js";
+export { pushGrantRepositories } from "./push_grant_repositories.js";
