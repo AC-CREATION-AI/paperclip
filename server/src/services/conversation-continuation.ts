@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm"
 import { environmentLeases, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, type Db } from "@paperclipai/db";
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { readProcessStartedAt } from "./hot-restart.js";
+import { legacyControllerBootId } from "./legacy-controller-lease.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 
 // These adapters accept a conversation turn. Retrying a process or webhook can
@@ -14,6 +15,9 @@ export const CONVERSATION_ADAPTER_TYPES = [
   "claude_local", "codex_local", "cursor", "gemini_local", "opencode_local",
   "pi_local", "grok_local", "kimi_local", "hermes_local", "omniroute_native",
 ] as const;
+
+/** Conversation adapters executed inside the server process (no OS PID). */
+export const IN_PROCESS_CONVERSATION_ADAPTER_TYPES = ["omniroute_native"] as const;
 
 export function isConversationAdapter(adapterType: string): boolean {
   return (CONVERSATION_ADAPTER_TYPES as readonly string[]).includes(adapterType);
@@ -65,6 +69,29 @@ export async function runUsedConversationAdapter(db: Db, run: typeof heartbeatRu
   return adapterType !== null && isConversationAdapter(adapterType);
 }
 
+/** In-process adapters have no PID to probe, so a terminal row alone does not
+ * prove the provider call stopped. The controller clears its lease in `finally`
+ * once execution settled; otherwise the lease must have expired under a boot
+ * that is not this process (owning process gone or no longer renewing).
+ * Same boot with an uncleared lease means the controller may still run (ACC-4454).
+ */
+function inProcessControllerStoppedPredicate() {
+  const adapterType = sql`coalesce(${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType', (
+    select ${heartbeatRunEvents.payload}->>'adapterType' from ${heartbeatRunEvents}
+    where ${heartbeatRunEvents.companyId} = ${heartbeatRuns.companyId}
+      and ${heartbeatRunEvents.runId} = ${heartbeatRuns.id}
+      and ${heartbeatRunEvents.eventType} = 'adapter.invoke'
+    order by ${heartbeatRunEvents.seq} desc limit 1), '')`;
+  return or(
+    sql`${adapterType} not in (${sql.join(IN_PROCESS_CONVERSATION_ADAPTER_TYPES.map(t => sql`${t}`), sql`, `)})`,
+    isNull(heartbeatRuns.controllerLeaseExpiresAt),
+    and(
+      sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`,
+      sql`${heartbeatRuns.controllerBootId} is distinct from ${legacyControllerBootId}`,
+    ),
+  );
+}
+
 /** Only immutable run evidence can retire a historical conversation hold.
  * An agent's current adapter can differ from the one that executed this run.
  * Missing evidence retains the hold; the current agent is never a fallback.
@@ -85,6 +112,7 @@ export function conversationRecoveryActionPredicate() {
         and coalesce(${heartbeatRuns.resultJson}->'workspaceRestoreRecovery'->>'schema', '') <> 'paperclip.workspace-restore-recovery.v1'
         and ${inArray(heartbeatRuns.status, ['failed', 'timed_out', 'interrupted', 'cancelled'])}
         and ${conversationRunPredicate()}
+        and ${inProcessControllerStoppedPredicate()}
         and ${or(
           sql`${heartbeatRuns.resultJson}->>'conversationContinuation' = ${CONVERSATION_CONTINUATION_POLICY}`,
           eq(heartbeatRuns.status, "interrupted"),

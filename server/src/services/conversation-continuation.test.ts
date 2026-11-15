@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { agents, companies, createDb, heartbeatRuns, issues, issueRecoveryActions, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker, isConversationAdapter } from "./conversation-continuation.js";
+import { legacyControllerBootId } from "./legacy-controller-lease.js";
 import { deliverExecutionStatuses } from "./execution-status-delivery.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -72,12 +73,29 @@ describePostgres("execution identity query contracts", () => {
         resultJson: { conversationContinuation: "continue_conversation_v1" }, folds: true },
       { adapterType: "omniroute_native", status: "failed", errorCode: "process_lost", resultJson: {}, folds: true },
       { adapterType: "http", status: "failed", errorCode: "process_lost", resultJson: {}, folds: false },
+      // Stop proof: a lease the controller did not clear still holds unless it
+      // expired under another boot. This boot may still be running the call.
+      { adapterType: "omniroute_native", status: "failed", errorCode: "process_lost", resultJson: {},
+        bootId: legacyControllerBootId, leaseMs: 60_000, folds: false },
+      { adapterType: "omniroute_native", status: "failed", errorCode: "process_lost", resultJson: {},
+        bootId: legacyControllerBootId, leaseMs: -60_000, folds: false },
+      { adapterType: "omniroute_native", status: "failed", errorCode: "process_lost", resultJson: {},
+        bootId: randomUUID(), leaseMs: 60_000, folds: false },
+      { adapterType: "omniroute_native", status: "failed", errorCode: "process_lost", resultJson: {},
+        bootId: randomUUID(), leaseMs: -60_000, folds: true },
+      { adapterType: "omniroute_native", status: "cancelled", errorCode: "cancelled",
+        resultJson: { executionCancellation: { state: "acknowledged" } }, bootId: legacyControllerBootId, leaseMs: null, folds: true },
+      // PID-based adapters keep their existing contract; the lease is not their stop proof.
+      { adapterType: "codex_local", status: "failed", errorCode: "process_lost", resultJson: {},
+        bootId: legacyControllerBootId, leaseMs: 60_000, folds: true },
     ];
     const expected: string[] = [];
     for (const [index, item] of cases.entries()) {
       const [row] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId,
         status: item.status, errorCode: item.errorCode, runtimeMode: "legacy", contextSnapshot: { issueId: f.issueId },
-        resultJson: item.resultJson, runnerProfileJson: { adapterDispatch: { adapterType: item.adapterType } } }).returning();
+        resultJson: item.resultJson, runnerProfileJson: { adapterDispatch: { adapterType: item.adapterType } },
+        controllerBootId: "bootId" in item ? item.bootId : null,
+        controllerLeaseExpiresAt: "leaseMs" in item && item.leaseMs != null ? new Date(Date.now() + item.leaseMs) : null }).returning();
       const [action] = await db.insert(issueRecoveryActions).values({ companyId: f.companyId, sourceIssueId: f.issueId,
         kind: "active_run_watchdog", status: "resolved", outcome: "blocked", ownerType: "board",
         cause: "legacy_execution_requires_reconciliation", fingerprint: `omniroute-${index}`,
