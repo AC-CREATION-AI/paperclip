@@ -1068,6 +1068,79 @@ POST /api/issues/{issueId}/interactions
 }
 ```
 
+<a id="confirmation-targets"></a>
+
+**Confirmation targets.** `payload.target` is optional on `request_confirmation`, `request_checkbox_confirmation` and `request_item_verdicts`. When present, its `type` must be one of exactly three values. Any other `type` (`skill`, `resource`, `agent`, a missing `type`…) is rejected with `400 Validation error` and an `invalid_union` issue at path `payload.target.type` ("Invalid discriminator value. Expected 'issue_document' | 'issue_attachment' | 'custom'"). Pick the type from what the decision is about; never invent a new one.
+
+| `type` | Use it for | Required | Optional | Checked at create |
+| --- | --- | --- | --- | --- |
+| `issue_document` | A revision of a document on this issue (plan, spec, report). | `key` (1–64 chars, `^[a-z0-9][a-z0-9_-]*$`), `revisionId` (uuid) | `issueId`, `documentId` (uuid), `revisionNumber` (integer > 0), `label`, `href` | `revisionId` (and `revisionNumber` if sent) must be the latest revision, else `422`. A newer revision later expires the card with `stale_target`. |
+| `issue_attachment` | The exact bytes of a file attached to this issue. | `attachmentId` (uuid), `assetId` (uuid), `sha256` (64 lowercase hex chars) | `issueId` (must be this issue), `label`, `href` | The three values must match an attachment of this issue (`GET /api/issues/{issueId}/attachments`), else `422`. |
+| `custom` | Anything else: a PR head, an external resource, a skill or an agent change. Put the identity in `key`. | `key` (1–120 chars) | `revisionId` (1–255 chars, free text such as a commit SHA or content hash), `revisionNumber` (integer > 0), `label`, `href` | Shape only. The server does not track staleness for `custom`: put the exact version you ask about in `key` or `revisionId`. |
+
+`label` is 1–120 chars; `href` must be a root-relative path, a `#fragment` or an http(s) URL.
+
+Confirm the exact bytes of an attachment:
+
+```json
+POST /api/issues/{issueId}/interactions
+{
+  "kind": "request_confirmation",
+  "idempotencyKey": "confirmation:{issueId}:attachment:{attachmentId}",
+  "title": "Approve the delivered file",
+  "continuationPolicy": "wake_assignee",
+  "payload": {
+    "version": 1,
+    "prompt": "Approve this exact file for delivery?",
+    "acceptLabel": "Approve file",
+    "rejectLabel": "Request changes",
+    "target": {
+      "type": "issue_attachment",
+      "attachmentId": "{attachmentId}",
+      "assetId": "{assetId}",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "label": "report.pdf"
+    }
+  }
+}
+```
+
+Replace the `sha256` placeholder with the attachment's real `sha256` from `GET /api/issues/{issueId}/attachments`.
+
+Confirm something that is neither an issue document nor an attachment. Here, a proposed change to an agent's instructions; the same shape serves a PR head with `key: "pr:<repo>#<n>"` and `revisionId: "<head sha>"`:
+
+```json
+POST /api/issues/{issueId}/interactions
+{
+  "kind": "request_confirmation",
+  "idempotencyKey": "confirmation:{issueId}:agent-instructions:{agentId}:{contentHash}",
+  "title": "Apply the instructions change",
+  "continuationPolicy": "wake_assignee_on_accept",
+  "payload": {
+    "version": 1,
+    "prompt": "Apply this exact diff to the agent's AGENTS.md?",
+    "acceptLabel": "Apply diff",
+    "rejectLabel": "Request changes",
+    "detailsMarkdown": "```diff\n- Old rule.\n+ New rule.\n```",
+    "target": {
+      "type": "custom",
+      "key": "agent:{agentId}:instructions",
+      "revisionId": "{contentHash}",
+      "label": "AGENTS.md"
+    }
+  }
+}
+```
+
+A `custom` target only names the decision. It becomes **change consent** for an agent that holds a suggest-only permission (`agents:suggest-changes`, whose direct writes answer `403` with `details.reason: "deny_missing_consent"`) only when all of these hold: that same agent created the card in an earlier run, the card is `accepted` and not yet consumed, `detailsMarkdown` shows the diff (a `diff` code block or `+`/`-` lines), and `key` is a key that the called route checks. One accepted card is consumed by one write. Keys checked today:
+
+| `key` | Routes that consume it |
+| --- | --- |
+| `agent:{agentId}:instructions` | Instruction writes: `PATCH /api/agents/{agentId}/instructions-path`, `PATCH /api/agents/{agentId}/instructions-bundle` and `PUT`/`DELETE /api/agents/{agentId}/instructions-bundle/file`. |
+| `agent:{agentId}:profile` | `PATCH /api/agents/{agentId}` whose body contains only `name`, `role`, `title` and/or `capabilities`. Any other field in the same body (for example `desiredSkills`) takes the path that requires `agents:configure`. |
+
+No consent key unlocks `POST /api/agents/{agentId}/skills/sync`, or `PATCH /api/agents/{agentId}` with `desiredSkills`, on another agent: those routes require the direct permission `agents:configure`, so their `403 deny_missing_consent` is final whatever card was accepted. Do not create more cards or try other keys; ask the board to run the change or to decide on the permission. Other `custom` keys, including `skill:{skillId}`, pass schema validation but no agent-configuration route consumes them.
+
 Resolver governance:
 
 - **Omit `resolverPolicy` for a normal interaction.** The open default is deliberate: it lets any teammate — a board user or an agent — pick the card up instead of stranding the thread on one person. Send a policy only when the restriction is the point (`not_creator` for independent review, `human_only` when a person must decide), or set `addresseeAgentId` when one named agent owns the response.

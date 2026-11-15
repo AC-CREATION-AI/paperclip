@@ -278,6 +278,27 @@ export const runnerApiReference: Record<string, { section: string; description?:
       },
       {
         "body": {
+          "kind": "request_confirmation",
+          "idempotencyKey": "confirmation:{issueId}:attachment:{attachmentId}",
+          "title": "Approve the delivered file",
+          "continuationPolicy": "wake_assignee",
+          "payload": {
+            "version": 1,
+            "prompt": "Approve this exact file for delivery?",
+            "acceptLabel": "Approve file",
+            "rejectLabel": "Request changes",
+            "target": {
+              "type": "issue_attachment",
+              "attachmentId": "{attachmentId}",
+              "assetId": "{assetId}",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "label": "report.pdf"
+            }
+          }
+        }
+      },
+      {
+        "body": {
           "kind": "request_checkbox_confirmation",
           "idempotencyKey": "checkbox:{issueId}:cleanup-files:{planRevisionId}",
           "title": "Confirm files to delete",
