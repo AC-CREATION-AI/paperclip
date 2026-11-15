@@ -53,7 +53,7 @@ import {
 } from "./probe-diagnostics.js";
 import { createWorkspaceRestoreTeardown } from "@paperclipai/adapter-utils/workspace-restore-teardown";
 import { buildLocalAdapterTestProbeEnv } from "./probe-env.js";
-import { detectClaudeLoginRequired, extractClaudeRetryNotBefore, isClaudeProviderQuotaError, parseClaudeStreamJson } from "./parse.js";
+import { detectClaudeLoginRequired, extractClaudeRetryNotBefore, isClaudeGatewayRateLimitError, isClaudeProviderQuotaError, parseClaudeStreamJson } from "./parse.js";
 import { buildClaudeProbePermissionArgs, claudeSandboxPermissionEnv } from "./permissions.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
 import { resolveClaudeModel, SANDBOX_INSTALL_COMMAND } from "../index.js";
@@ -325,13 +325,23 @@ export function classifyClaudeTerminalSessionFailure(
   // error inferred from text. Keep it on the existing sign-in recovery path.
   if (failure.category === "access") return { errorCode: "acpx_auth_required" };
   // `limit` also includes context, turn, rate and configured budget limits.
-  // Only the provider's quota wording qualifies for a quota wait.
+  // Only the provider's quota wording qualifies for a quota wait; a gateway
+  // 429 qualifies for a transient retry after its reset.
   if (failure.category !== "limit") return null;
   const surface = { errorMessage: [failure.title, failure.details].filter(Boolean).join("\n") };
   // claude-agent-acp uses this exact quota_exhausted fallback when no provider
   // title is available. It does not match the CLI's usage-limit wording.
   const isQuotaFallback = failure.title === "The Claude account has no available quota.";
-  if (!isQuotaFallback && !isClaudeProviderQuotaError(surface)) return null;
+  if (!isQuotaFallback && !isClaudeProviderQuotaError(surface)) {
+    // A gateway 429 is a rate window: retry after its announced reset.
+    if (!isClaudeGatewayRateLimitError(surface)) return null;
+    const retryNotBefore = extractClaudeRetryNotBefore(surface, now)?.toISOString();
+    return {
+      errorCode: "claude_transient_upstream",
+      errorFamily: "transient_upstream",
+      ...(retryNotBefore ? { retryNotBefore } : {}),
+    };
+  }
   const retryNotBefore = extractClaudeRetryNotBefore(surface, now)?.toISOString();
   return {
     errorCode: "provider_quota",

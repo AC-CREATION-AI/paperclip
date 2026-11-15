@@ -29,6 +29,15 @@ const CLAUDE_MODEL_NOT_FOUND_RE =
 const CLAUDE_EXTRA_USAGE_RESET_RE =
   /(?:you(?:'|’)ve\s+hit\s+your\s+(?:\w+\s+)?limit|session\s+limit\s+(?:reached|exceeded)|out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
 
+// Gateways in front of Claude (OmniRoute) report the quota window as a
+// countdown: "Request rejected (429) · ... pre-dispatch filters reset after 4m 28s".
+const CLAUDE_RELATIVE_RESET_RE =
+  /(?:\b429\b|rate[-\s]?limit|quota|pre-dispatch\s+filters|temporarily\s+unavailable)[^\n]{0,600}?\bresets?\s+(?:after|in)\s+(?:(\d+)\s*h(?![a-z])\s*)?(?:(\d+)\s*m(?![a-z])\s*)?(?:(\d+)\s*s(?![a-z]))?/i;
+// The countdown is rounded down to the second and measured on the gateway's
+// clock: never retry on the boundary itself.
+const CLAUDE_RELATIVE_RESET_MARGIN_MS = 30_000;
+const CLAUDE_GATEWAY_RATE_LIMIT_RE = /(?:\b429\b|all\s+targets\s+were\s+skipped\s+by\s+pre-dispatch\s+filters)/i;
+
 /**
  * Sum the per-model usage ledger from a Claude CLI result event. The result
  * event's top-level `usage` reflects only the main-loop message chain, so it
@@ -545,8 +554,31 @@ export function extractClaudeRetryNotBefore(
 ): Date | null {
   const haystack = buildClaudeTransientHaystack(input);
   const match = haystack.match(CLAUDE_EXTRA_USAGE_RESET_RE);
-  if (!match) return null;
-  return parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
+  if (match) return parseClaudeResetClockTime(match[1] ?? "", now, match[2]);
+  return parseClaudeRelativeReset(haystack, now);
+}
+
+function parseClaudeRelativeReset(haystack: string, now: Date): Date | null {
+  const match = haystack.match(CLAUDE_RELATIVE_RESET_RE);
+  if (!match || (!match[1] && !match[2] && !match[3])) return null;
+  const seconds =
+    Number(match[1] ?? 0) * 3600 + Number(match[2] ?? 0) * 60 + Number(match[3] ?? 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return new Date(now.getTime() + seconds * 1000 + CLAUDE_RELATIVE_RESET_MARGIN_MS);
+}
+
+/**
+ * A gateway 429 (OmniRoute: "all targets were skipped by pre-dispatch
+ * filters") is a rate window, not an account quota. Generic "rate limit"
+ * wording stays out: a typed `limit` also covers context, turn and budget.
+ */
+export function isClaudeGatewayRateLimitError(input: {
+  parsed?: Record<string, unknown> | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  errorMessage?: string | null;
+}): boolean {
+  return CLAUDE_GATEWAY_RATE_LIMIT_RE.test(buildClaudeTransientHaystack(input));
 }
 
 export function isClaudeTransientUpstreamError(input: {

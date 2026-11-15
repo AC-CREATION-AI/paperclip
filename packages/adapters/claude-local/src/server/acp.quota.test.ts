@@ -174,6 +174,33 @@ it.each([
   expect(logs).toContain(title);
 });
 
+it("retries an OmniRoute pre-dispatch 429 after its announced reset (ACC-4351)", async () => {
+  const title = "API Error: Request rejected (429) · Service temporarily unavailable: " +
+    "all targets were skipped by pre-dispatch filters reset after 4m 28s";
+  const retryNotBefore = new Date(now.getTime() + (4 * 60 + 28) * 1000 + 30_000).toISOString();
+  expect(classifyClaudeTerminalSessionFailure({ category: "limit", title }, now)).toEqual({
+    errorCode: "claude_transient_upstream",
+    errorFamily: "transient_upstream",
+    retryNotBefore,
+  });
+  const { result } = await executeFailure(title);
+  expect(result).toMatchObject({
+    exitCode: 1,
+    errorCode: "claude_transient_upstream",
+    errorFamily: "transient_upstream",
+    retryNotBefore,
+    resultJson: { errorFamily: "transient_upstream", retryNotBefore },
+  });
+  expect(result.resultJson?.providerQuotaRetryNotBefore).toBeUndefined();
+});
+
+it("keeps a gateway 429 without a countdown on the bounded transient ladder", () => {
+  expect(classifyClaudeTerminalSessionFailure({
+    category: "limit",
+    title: "API Error: Request rejected (429) · Service temporarily unavailable",
+  }, now)).toEqual({ errorCode: "claude_transient_upstream", errorFamily: "transient_upstream" });
+});
+
 it("does not infer quota from the historical generic terminal-limit error", () => {
   expect(classifyClaudeTerminalSessionFailure({
     category: "limit",
