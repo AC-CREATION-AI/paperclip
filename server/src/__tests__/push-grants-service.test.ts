@@ -521,13 +521,45 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
       expect(forge.pushes).toHaveLength(0);
     });
 
-    it("accepts a pretty-printed block and compares SHAs and repository case-insensitively", async () => {
+    it("accepts the canonical block and compares SHAs and repository case-insensitively", async () => {
       const runId = await liveRun();
       const details = JSON.stringify({
         kind: "push_grant", repository: REPO.toLowerCase(), ref: REF, mode: "force-with-lease",
         expectedOldSha: OLD.toUpperCase(), newSha: NEW.toUpperCase(),
-      }, null, 2);
-      await expect(service().issue(claimsFor(runId), grantInput(await agreement({ details })))).resolves.toMatchObject({ outcome: "issued" });
+      });
+      // Surrounding whitespace is trimmed; the block itself must be canonical.
+      await expect(service().issue(claimsFor(runId), grantInput(await agreement({ details: `\n ${details} \n` }))))
+        .resolves.toMatchObject({ outcome: "issued" });
+    });
+
+    // ACC-4974 N1 — only the canonical compact form is accepted, so the text the
+    // human read is exactly the tuple the server applies. A pretty-printed block
+    // is refused on purpose.
+    it("N1 refuses a key spelled with a \\u escape, an exact duplicate, a non-canonical order and a pretty-printed block", async () => {
+      const runId = await liveRun();
+      const before = await grantCount();
+      const canonical = block();
+      const escapedRepository = canonical.replace('"repository":', `"repository":"evil/repo","re\\u0070ository":`);
+      const escapedNewSha = canonical.replace('"newSha":', `"newSha":"${OTHER}","new\\u0053ha":`);
+      // Sanity: JSON.parse silently decodes the escape and keeps the last value.
+      expect((JSON.parse(escapedRepository) as { repository: string }).repository).toBe(REPO);
+      expect((JSON.parse(escapedNewSha) as { newSha: string }).newSha).toBe(NEW);
+      const full = JSON.parse(canonical) as Record<string, unknown>;
+      const reordered = JSON.stringify({ newSha: full.newSha, ...full });
+      expect(reordered).not.toBe(canonical);
+      for (const details of [
+        escapedRepository,
+        escapedNewSha,
+        canonical.replace("}", `,"newSha":"${NEW}"}`),
+        reordered,
+        JSON.stringify(full, null, 2),
+        canonical.replace('"kind":', '"kind" :'),
+        canonical.replace('"ref":"r', '"ref":"\\u0072'),
+      ]) {
+        await expect(service().issue(claimsFor(runId), grantInput(await agreement({ details })))).rejects.toMatchObject({ status: 403 });
+      }
+      expect(await grantCount()).toBe(before);
+      expect(forge.pushes).toHaveLength(0);
     });
 
     it("keeps an agreement blocked after an unknown outcome, and reusable after a failure without external effect", async () => {
@@ -636,6 +668,30 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
       await fs.mkdir(path.join(cwd, ".git", "objects", "info"), { recursive: true });
       await fs.writeFile(path.join(cwd, ".git", "objects", "info", "alternates"), "/elsewhere/objects\n");
       await expect(consumeFrom(cwd)).resolves.toMatchObject({ pushed: false, outcome: "failed", errorCode: "source_unavailable" });
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    // ACC-4974 N2 — the object store must not reach another repository.
+    it("N2 refuses a workspace whose objects or objects/info is a symlink, or that has a commondir", async () => {
+      const other = path.join(workspaceRoot, "n2-other");
+      await fs.mkdir(path.join(other, ".git", "objects", "info"), { recursive: true });
+      const elsewhere = path.join(workspaceRoot, "n2-info");
+      await fs.mkdir(elsewhere, { recursive: true });
+      await fs.writeFile(path.join(elsewhere, "alternates"), `${path.join(other, ".git", "objects")}\n`);
+
+      const objectsLink = path.join(workspaceRoot, "n2-objects-link");
+      await fs.mkdir(path.join(objectsLink, ".git"), { recursive: true });
+      await fs.symlink(path.join(other, ".git", "objects"), path.join(objectsLink, ".git", "objects"));
+      const infoLink = path.join(workspaceRoot, "n2-info-link");
+      await fs.mkdir(path.join(infoLink, ".git", "objects"), { recursive: true });
+      await fs.symlink(elsewhere, path.join(infoLink, ".git", "objects", "info"));
+      const commondir = path.join(workspaceRoot, "n2-commondir");
+      await fs.mkdir(path.join(commondir, ".git", "objects", "info"), { recursive: true });
+      await fs.writeFile(path.join(commondir, ".git", "commondir"), `${path.join(other, ".git")}\n`);
+
+      for (const cwd of [objectsLink, infoLink, commondir]) {
+        await expect(consumeFrom(cwd)).resolves.toMatchObject({ pushed: false, outcome: "failed", errorCode: "source_unavailable" });
+      }
       expect(forge.pushes).toHaveLength(0);
     });
 

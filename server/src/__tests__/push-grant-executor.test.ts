@@ -112,4 +112,42 @@ describe("assertConfinedPushSource (ACC-4966 B3)", () => {
       await fs.rm(outside, { recursive: true, force: true });
     }
   });
+  // ACC-4974 N2 — symlinks inside the object store and commondir are refused.
+  it("refuses .git/objects or objects/info as a symlink, a nested symlink and a commondir; keeps a real store", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-push-source-n2-"));
+    try {
+      const other = path.join(root, "other");
+      await fs.mkdir(path.join(other, ".git", "objects", "pack"), { recursive: true });
+      const infoDir = path.join(root, "info-dir");
+      await fs.mkdir(infoDir);
+      await fs.writeFile(path.join(infoDir, "alternates"), `${path.join(other, ".git", "objects")}\n`);
+
+      const nominal = path.join(root, "nominal");
+      await fs.mkdir(path.join(nominal, ".git", "objects", "info"), { recursive: true });
+      await fs.mkdir(path.join(nominal, ".git", "objects", "ab"));
+      await fs.writeFile(path.join(nominal, ".git", "objects", "ab", "cdef"), "x");
+      expect(await assertConfinedPushSource(nominal, [root])).toBe(await fs.realpath(nominal));
+
+      const objectsLink = path.join(root, "objects-link");
+      await fs.mkdir(path.join(objectsLink, ".git"), { recursive: true });
+      await fs.symlink(path.join(other, ".git", "objects"), path.join(objectsLink, ".git", "objects"));
+      const infoLink = path.join(root, "info-link");
+      await fs.mkdir(path.join(infoLink, ".git", "objects"), { recursive: true });
+      await fs.symlink(infoDir, path.join(infoLink, ".git", "objects", "info"));
+      const packLink = path.join(root, "pack-link");
+      await fs.mkdir(path.join(packLink, ".git", "objects", "info"), { recursive: true });
+      await fs.symlink(path.join(other, ".git", "objects", "pack"), path.join(packLink, ".git", "objects", "pack"));
+      const commondir = path.join(root, "commondir");
+      await fs.mkdir(path.join(commondir, ".git", "objects", "info"), { recursive: true });
+      await fs.writeFile(path.join(commondir, ".git", "commondir"), `${path.join(other, ".git")}\n`);
+      const noObjects = path.join(root, "no-objects");
+      await fs.mkdir(path.join(noObjects, ".git"), { recursive: true });
+
+      for (const candidate of [objectsLink, infoLink, packLink, commondir, noObjects]) {
+        await expect(assertConfinedPushSource(candidate, [root])).rejects.toMatchObject({ code: "source_unavailable" });
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

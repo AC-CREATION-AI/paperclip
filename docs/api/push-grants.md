@@ -32,13 +32,14 @@ A replay with the same `requestId` returns the stored result only to the same gr
 
 ## Human agreement format
 
-`interactionId` must reference an accepted, human-only `request_confirmation` on the task or one of its ancestors. Its `detailsMarkdown` must be **only** this JSON object (pretty-printing allowed):
+`interactionId` must reference an accepted, human-only `request_confirmation` on the task or one of its ancestors. Its `detailsMarkdown` must be **only** this JSON object, in its canonical form:
 
 ```json
 {"kind":"push_grant","repository":"owner/name","ref":"refs/heads/feature","mode":"force-with-lease","expectedOldSha":"<40 hex>","newSha":"<40 hex>"}
 ```
 
-- No extra or missing field, no duplicated key, and no prose around the block.
+- Canonical form only: after trimming surrounding whitespace, the details must equal `JSON.stringify({ kind, repository, ref, mode, expectedOldSha, newSha })` of the parsed values. That means one line, no spaces, fields in this exact order, and no `\uXXXX` escape. A pretty-printed block, a reordered block or a block with a duplicated key (including a key spelled with an escape such as `"re\u0070ository"`) is refused. What the human reads is exactly what the server applies.
+- No extra or missing field, and no prose around the block.
 - The prompt, the details and the human answer together must contain exactly one block.
 - The block must match the request exactly. Repository and SHAs are compared case-insensitively, and the ref and mode must match exactly.
 - One agreement opens one grant. The agreement can be used again only if that grant ended as `failed`, `expired`, `revoked` or `rejected`. A grant that is `issued`, `consumed` or `unknown` blocks the agreement. The database enforces this with the partial unique index `push_grants_active_interaction_uq`.
@@ -57,4 +58,7 @@ The server fetches the commit from the run workspace (`paperclipWorkspace.cwd`).
 
 - the real path is outside the instance roots `isolated-workspaces`, `projects` or `workspaces`;
 - `.git` is not a directory;
+- `.git/objects` is missing or is not a real directory (for example a symbolic link to another repository);
+- a symbolic link exists anywhere under `.git/objects` (for example `objects/info` pointing at a directory that holds an `alternates` file);
+- `.git/commondir` exists;
 - `.git/objects/info/alternates` exists.
