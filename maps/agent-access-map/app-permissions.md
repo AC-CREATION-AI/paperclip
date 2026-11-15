@@ -88,6 +88,8 @@ Policy: `tools:manage_profiles`; [shared management policy](../../doc/plans/2026
 Evidence: `source-only` — [route](../../server/src/routes/tool-access.ts); reviewed in the working tree based on the source commit above.
 Verification: `not-run` — individual operation not executed in this audit; shared authorization and representative family flows are exercised by the authenticated integration suite. Follow the route schema, inspect persistence/audit, and assert owner, scope and revoked-authority denial.
 Gaps: This individual operation has source review but no recorded HTTP verification. Provider availability and live setup remain unqualified.
+The response carries the install-set `revision` that a following PUT must echo
+as `expectedRevision`.
 
 ### `put-tool-connections-installs`
 
@@ -99,6 +101,13 @@ On-demand MCP additions are transport-only. Existing targets retain their saved
 profile assignments unless `bindAppProfile: false` explicitly selects atomic
 unbinding; authorization applies even when the install target is unchanged.
 An agent transport-only transition refuses a surviving company-wide app binding.
+Writes are compare-and-write: the body requires `expectedRevision` (the
+`revision` read from GET). Under the connection lock the server compares it with
+the per-connection revision and answers 409 `installs_revision_conflict` without
+mutating when it is stale. A statement trigger on `tool_connection_installs`
+advances the revision for every writer (REST, internal services, other
+processes on the same database), so no write path can bypass the check
+([concurrency regression](../../server/src/__tests__/tool-connection-installs-revision.test.ts)).
 Non-empty saves still remove legacy connection-wide include entries from the
 managed app profile when no new targets are added. The
 [transport-only regressions](../../server/src/__tests__/github-transport-only-installs.test.ts)

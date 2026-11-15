@@ -202,6 +202,8 @@ export interface ToolConnection {
   createdAt: Date;
   updatedAt: Date;
   installs?: ToolConnectionInstall[];
+  /** Install-set revision matching `installs`; populated alongside them. */
+  installsRevision?: number;
   grants?: ConnectionGrant[];
 }
 
@@ -374,6 +376,8 @@ export interface ToolConnectionInstall {
 export interface ToolConnectionInstallSnapshot {
   connectionId: string;
   installs: ToolConnectionInstall[];
+  /** Monotonic install-set revision; send it back as `expectedRevision` on PUT. */
+  revision: number;
 }
 
 /**

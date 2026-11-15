@@ -338,6 +338,8 @@ export function emailConnectionService(
       await lockToolConnectionRuntimeInputs(db, companyId, id);
       const connection = await emailConnectionService(db, fetchImpl).get(companyId, id, actor);
       const tools = toolAccessService(db);
+      // Revision read before the installs it guards (ACC-4941).
+      const { revision: installsRevision } = await tools.getConnectionInstallSnapshot(id, companyId);
       const installs = await db
         .select()
         .from(toolConnectionInstalls)
@@ -369,6 +371,7 @@ export function emailConnectionService(
             }))),
             { targetType: "agent", targetId: agentId },
           ],
+          expectedRevision: installsRevision,
         },
         {
           actorType: actor.agentId ? "agent" : "user",

@@ -6,7 +6,7 @@ import { connectionActorUserId } from "./tool-access/actor.js";
 import { restConnectorFor } from "./connectors/rest-registry.js";
 import { createConnectionCredentialValidation } from "./tool-access/connections/credential-validation.js";
 import { createConnectionGrants } from "./tool-access/connections/grants.js";
-import { createConnectionInstalls } from "./tool-access/connections/installs.js";
+import { createConnectionInstalls, readConnectionInstallsRevision, readConnectionInstallsRevisions } from "./tool-access/connections/installs.js";
 import { createConnectionRemoval } from "./tool-access/connections/removal.js";
 import { createToolRemoteHttp } from "./tool-access/remote-http.js";
 import { classifyRisk, normalizeToolDescriptor, type McpToolDescriptor } from "./tool-access/catalog/descriptors.js";
@@ -4445,6 +4445,8 @@ export function toolAccessService(
         .orderBy(desc(toolConnections.updatedAt));
       const connections = rows.map(toConnection);
       if (connections.length === 0) return connections;
+      // Revisions before installs (see getConnectionInstallSnapshot).
+      const installRevisions = await readConnectionInstallsRevisions(db, companyId);
       const installRows = await db
         .select()
         .from(toolConnectionInstalls)
@@ -4459,8 +4461,10 @@ export function toolAccessService(
         installs.push(toConnectionInstall(row));
         installsByConnection.set(row.connectionId, installs);
       }
-      for (const connection of connections)
+      for (const connection of connections) {
         connection.installs = installsByConnection.get(connection.id) ?? [];
+        connection.installsRevision = installRevisions.get(connection.id) ?? 0;
+      }
       // Enrich with "last used" = most recent tool-call event per connection so the
       // prosumer Apps list can surface a staleness signal without an N+1 fan-out.
       const lastUsedRows = await db
@@ -4595,6 +4599,8 @@ export function toolAccessService(
       const connection = toConnection(
         await getConnectionRow(connectionId, companyId),
       );
+      // Revision before installs (see getConnectionInstallSnapshot).
+      connection.installsRevision = await readConnectionInstallsRevision(db, connection.id);
       connection.installs = await listConnectionInstalls(
         connection.id,
         connection.companyId,
@@ -4608,6 +4614,7 @@ export function toolAccessService(
     ...toolActivity,
 
     listConnectionInstalls,
+    getConnectionInstallSnapshot: connectionInstalls.getConnectionInstallSnapshot,
     putConnectionInstalls: connectionInstalls.putConnectionInstalls,
 
     updateConnection: async (

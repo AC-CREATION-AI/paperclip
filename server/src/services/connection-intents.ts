@@ -1165,8 +1165,9 @@ export function connectionIntentService(db: Db) {
         if (managed.binding.mode === "responsible_user") {
           const selected = await service.select({ companyId: loaded.issue.companyId, agentId: payload.requestingAgentId, userId, adapterType: managed.agent.adapterType, model: managed.adapterConfig.model, runnerProvider: managed.adapterConfig.provider, acpxAgent: managed.adapterConfig.acpxAgent, binding: managed.binding, allowUninstalledPersonal: true });
           if (selected.connection.id !== selectedConnection.id) throw conflict("Choose this account as your personal default in Connections first");
-          const installs = await txAccess.listConnectionInstalls(selectedConnection.id, loaded.issue.companyId);
-          await txAccess.putConnectionInstalls(selectedConnection.id, { installs: [...installs, { targetType: "agent", targetId: payload.requestingAgentId }] }, { actorType: "user", actorId: userId });
+          // Versioned additive write (ACC-4941): a concurrent install change rejects instead of being overwritten.
+          const { installs, revision } = await txAccess.getConnectionInstallSnapshot(selectedConnection.id, loaded.issue.companyId);
+          await txAccess.putConnectionInstalls(selectedConnection.id, { installs: [...installs, { targetType: "agent", targetId: payload.requestingAgentId }], expectedRevision: revision }, { actorType: "user", actorId: userId });
         }
         const selected = await service.select({ companyId: loaded.issue.companyId, agentId: payload.requestingAgentId, userId, adapterType: managed.agent.adapterType, model: managed.adapterConfig.model, runnerProvider: managed.adapterConfig.provider, acpxAgent: managed.adapterConfig.acpxAgent, binding: managed.binding });
         if (selected.connection.id !== selectedConnection.id) throw conflict("This is not the account selected for the agent");
@@ -1223,7 +1224,8 @@ export function connectionIntentService(db: Db) {
         );
       }
 
-      const installs = await txAccess.listConnectionInstalls(
+      // Versioned additive write (ACC-4941): a concurrent install change rejects instead of being overwritten.
+      const { installs, revision: installsRevision } = await txAccess.getConnectionInstallSnapshot(
         selectedConnection.id,
         loaded.issue.companyId,
       );
@@ -1235,7 +1237,7 @@ export function connectionIntentService(db: Db) {
         install.targetType === requestedInstall.targetType && install.targetId === requestedInstall.targetId
       ) ? installs.map(install => install.targetType === requestedInstall.targetType && install.targetId === requestedInstall.targetId
         ? requestedInstall : install) : [...installs, requestedInstall];
-      await txAccess.putConnectionInstalls(selectedConnection.id, { installs: additiveInstalls }, {
+      await txAccess.putConnectionInstalls(selectedConnection.id, { installs: additiveInstalls, expectedRevision: installsRevision }, {
         actorType: "user",
         actorId: userId,
       });

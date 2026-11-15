@@ -174,9 +174,10 @@ export function RemoteMcpProductionSetup({ providerId, connection, host = "page"
       }
       // Persist the Access step before leaving for OAuth. Reconnect retains its existing installs.
       if (!requestedAgentId && (!prior || prior.status === "draft")) {
+        const { revision } = await toolsApi.getConnectionInstalls(result.connectionId);
         await toolsApi.putConnectionInstalls(result.connectionId, state.allAgents
           ? [{ targetType: "company", targetId: selectedCompanyId }]
-          : state.agentIds.map((targetId) => ({ targetType: "agent", targetId })));
+          : state.agentIds.map((targetId) => ({ targetType: "agent", targetId })), revision);
       }
       if (saveDraft) { if (onCancel) onCancel(); else navigate("/apps"); return; }
       if (result.auth?.kind === "oauth") {
