@@ -402,15 +402,23 @@ export const issueExecutionStageSchema = z.object({
   participants: z.array(issueExecutionStageParticipantSchema).default([]),
 });
 
+// Monitor writes fail often enough in agent runs that every rejection must say
+// how to fix the payload: only "external_service" is a valid kind, and dates
+// are UTC with a trailing "Z" (offsets such as +00:00 are rejected).
+export const ISSUE_MONITOR_KIND_ERROR =
+  'Monitor kind must be "external_service" ("poll" and other values are not supported); omit kind or send null for a plain timer';
+export const issueMonitorUtcDateTimeError = (field: "nextCheckAt" | "timeoutAt") =>
+  `Monitor ${field} must be an ISO 8601 UTC timestamp ending in "Z", e.g. 2026-11-20T10:00:00Z; offsets such as +00:00 are rejected`;
+
 export const issueExecutionMonitorPolicySchema = z.object({
-  nextCheckAt: z.string().datetime(),
+  nextCheckAt: z.string().datetime({ message: issueMonitorUtcDateTimeError("nextCheckAt") }),
   notes: z.string().max(500).optional().nullable().default(null),
   scheduledBy: z
     .enum(ISSUE_MONITOR_SCHEDULED_BY)
     .optional()
     .default("assignee"),
   kind: z
-    .enum(ISSUE_EXECUTION_MONITOR_KINDS)
+    .enum(ISSUE_EXECUTION_MONITOR_KINDS, { message: ISSUE_MONITOR_KIND_ERROR })
     .optional()
     .nullable()
     .default(null),
@@ -430,7 +438,12 @@ export const issueExecutionMonitorPolicySchema = z.object({
     .optional()
     .nullable()
     .default(null),
-  timeoutAt: z.string().datetime().optional().nullable().default(null),
+  timeoutAt: z
+    .string()
+    .datetime({ message: issueMonitorUtcDateTimeError("timeoutAt") })
+    .optional()
+    .nullable()
+    .default(null),
   maxAttempts: z
     .number()
     .int()

@@ -73,6 +73,22 @@ const PENDING_STATUS: IssueExecutionState["status"] = "pending";
 const CHANGES_REQUESTED_STATUS: IssueExecutionState["status"] = "changes_requested";
 const MONITOR_INVALID_MESSAGE = "Monitor can only be scheduled on issues assigned to an agent in in_progress or in_review";
 const MONITOR_BOUNDS_EXHAUSTED_MESSAGE = "Monitor bounds are already exhausted";
+
+function monitorBoundsExhaustedError(
+  reason: IssueExecutionMonitorClearReason,
+  monitor: IssueExecutionMonitorPolicy,
+  attemptCount: number,
+) {
+  const hint = reason === "timeout_exceeded"
+    ? `timeoutAt ${monitor.timeoutAt} is not in the future; send a later timeoutAt (UTC, ending in "Z")`
+    : `attemptCount ${attemptCount} already reached maxAttempts ${monitor.maxAttempts}; send maxAttempts greater than ${attemptCount}, or omit it`;
+  return unprocessable(`${MONITOR_BOUNDS_EXHAUSTED_MESSAGE}: ${hint}`, {
+    clearReason: reason,
+    attemptCount,
+    maxAttempts: monitor.maxAttempts ?? null,
+    timeoutAt: monitor.timeoutAt ?? null,
+  });
+}
 const STAGE_DECISION_COMMENT_HINT = "Include the decision comment in the same PATCH request; prior comments are not considered.";
 export const REDACTED_ISSUE_MONITOR_EXTERNAL_REF = "[redacted]";
 
@@ -1109,7 +1125,7 @@ function applyMonitorTransition(input: TransitionInput, stagePatch: Record<strin
       });
       if (exhaustedReason) {
         if (input.monitorExplicitlyUpdated) {
-          throw unprocessable(MONITOR_BOUNDS_EXHAUSTED_MESSAGE, { clearReason: exhaustedReason });
+          throw monitorBoundsExhaustedError(exhaustedReason, input.policy.monitor, currentMonitorState?.attemptCount ?? 0);
         }
         patch.executionPolicy = stripMonitorFromExecutionPolicy(input.policy);
         patch.monitorNextCheckAt = null;
@@ -1163,7 +1179,7 @@ export function buildInitialIssueMonitorFields(input: {
     now: new Date(),
   });
   if (exhaustedReason) {
-    throw unprocessable(MONITOR_BOUNDS_EXHAUSTED_MESSAGE, { clearReason: exhaustedReason });
+    throw monitorBoundsExhaustedError(exhaustedReason, input.policy.monitor, 0);
   }
 
   const monitorState = buildScheduledMonitorState(null, input.policy.monitor);

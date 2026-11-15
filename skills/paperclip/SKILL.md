@@ -265,10 +265,38 @@ A "watcher" or "monitor" is not something that lives inside a run. A run/heartbe
 
 Because of that, follow these rules:
 
-- **Only claim a watcher/monitor exists after you have actually scheduled one.** Describing a watcher in a comment does not create it. Schedule it by setting `executionPolicy.monitor.nextCheckAt` (with `kind`/`serviceName`/`externalRef`/`timeoutAt`/`maxAttempts`) via `PATCH /api/issues/{id}`. Use that request's default full response (not `Prefer: return=minimal`) to confirm `monitorNextCheckAt` is non-null, `assigneeAgentId` is set, `assigneeUserId` is null, and `status` is `in_progress` or `in_review` — do not issue a confirming GET. The stored timestamp only fires under those conditions. Run a check on demand with `POST /api/issues/{id}/monitor/check-now`.
+- **Only claim a watcher/monitor exists after you have actually scheduled one.** Describing a watcher in a comment does not create it. Schedule it by setting `executionPolicy.monitor.nextCheckAt` (with `kind`/`serviceName`/`externalRef`/`timeoutAt`/`maxAttempts`) via `PATCH /api/issues/{id}`, using the [complete monitor payload](#monitor-payload) below. Use that request's default full response (not `Prefer: return=minimal`) to confirm `monitorNextCheckAt` is non-null, `assigneeAgentId` is set, `assigneeUserId` is null, and `status` is `in_progress` or `in_review` — do not issue a confirming GET. The stored timestamp only fires under those conditions. Run a check on demand with `POST /api/issues/{id}/monitor/check-now`.
 - **Describe it in checkable terms.** State the monitor's kind, next check time, and attempt/timeout bounds — not vague "a watcher will wake me" background magic. If you cannot name those, you have not scheduled one and must not imply that you have.
 - **Never imply a live watcher on a task you are marking `done`.** `done` means no follow-up on this issue, which contradicts an ongoing watcher. If real re-checking is still needed, keep the issue `in_progress`/`in_review` with a scheduled monitor instead of closing it.
 - This is enforced by state, not by narration: the disposition guard rejects an agent move to `in_review` (`invalid_issue_disposition`) unless a real review path exists — interaction, approval, human reviewer, typed participant, or an actually-scheduled monitor with a real `monitorNextCheckAt` — and the recovery classifier flags `in_review_without_action_path` for anything parked with no live wake path. Keep your comments consistent with that real state.
+
+<a id="monitor-payload"></a>
+
+**Complete monitor payload.** `PATCH /api/issues/{id}` with this body (replace the values; keep the shape). Send the whole `monitor` block every time: a fired monitor is removed from `executionPolicy`, so re-arming means sending it again in full.
+
+```json
+{
+  "executionPolicy": {
+    "monitor": {
+      "kind": "external_service",
+      "serviceName": "gitea-ci",
+      "externalRef": "example-org/example-repo#42",
+      "nextCheckAt": "2026-11-20T10:00:00Z",
+      "timeoutAt": "2026-11-21T10:00:00Z",
+      "maxAttempts": 3,
+      "notes": "Re-check the CI status of PR #42, then merge or report."
+    }
+  }
+}
+```
+
+Schema rules (the server rejects anything else):
+- `kind`: only `"external_service"`, or omit it / `null`. `"poll"` and any other value → 400 with path `executionPolicy.monitor.kind`.
+- `nextCheckAt` (required) and `timeoutAt`: ISO 8601 **UTC ending in `Z`** (`2026-11-20T10:00:00Z`, fractional seconds allowed). Offsets such as `+00:00` or `+01:00` → 400. Put `nextCheckAt` in the future (at least 30 minutes for a real wait) and `timeoutAt` after it. The native `set_task_monitor` tool rejects both mistakes with 422; `PATCH` does not check them yet, so a past `nextCheckAt` fires on the next scheduler tick (and uses an attempt) and a `timeoutAt` before `nextCheckAt` expires the monitor before it fires.
+- `maxAttempts`: integer from 1 to 100. `serviceName` ≤ 120 chars, `externalRef` ≤ 500 chars (stored, but returned as `[redacted]`), `notes` ≤ 500 chars. `scheduledBy` is set by the server.
+- Allowed only when the issue is `in_progress` or `in_review`, assigned to an agent and not to a user; otherwise 422 `Monitor can only be scheduled on issues assigned to an agent in in_progress or in_review`. Only the assignee agent or a board user may change it.
+- 422 `Monitor bounds are already exhausted: …` means `timeoutAt` is already past, or `maxAttempts` is not greater than the attempts already used (`details.attemptCount`). Send a later `timeoutAt` or a larger `maxAttempts`; resending the same values fails again.
+- Clear a monitor with `{"executionPolicy": {"monitor": null}}`.
 
 **Step 9 — Delegate if needed.** For ordinary execution tasks, create subtasks with `POST /api/companies/{companyId}/issues` and set `parentId` and `goalId`. If you omit `parentId` while running an ordinary execution task, the server sets `parentId` to your current task and records that default in the creation activity (if you may not create a child under that task, for example under a protected assignment policy, the task stays standalone instead); send `parentId: null` only when the new task is intentionally top-level work (CLI: `--standalone`). Either way the follow-up keeps run provenance, and the task page shows "Created from <your task> by <you>" without implying a blocker. For conversation tasks, use the project handoff above instead. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
 
