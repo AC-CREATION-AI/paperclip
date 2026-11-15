@@ -597,6 +597,94 @@ describeEmbeddedPostgres("pushGrantService (ACC-4931)", () => {
     });
   });
 
+  // ACC-4980 N3 — an issued grant that is never consumed expires; it must not lock the agreement forever.
+  describe("expiry of issued grants that were never consumed (ACC-4980 N3)", () => {
+    const at = (offsetMs: number) => pushGrantService(db, {
+      forgeFor: () => forge, workspaceRoots: () => [workspaceRoot], now: () => new Date(Date.now() + offsetMs),
+    });
+
+    async function grantsOf(interactionId: string) {
+      return db.select().from(pushGrants).where(eq(pushGrants.interactionId, interactionId));
+    }
+
+    it("N3 frees the agreement once its issued grant is past expiresAt, and leaves exactly one active grant", async () => {
+      const runId = await liveRun();
+      const interactionId = await agreement();
+      const stale = await service().issue(claimsFor(runId), grantInput(interactionId, { ttlSeconds: 1 }));
+      const fresh = await at(5_000).issue(claimsFor(runId), grantInput(interactionId));
+      expect(fresh.outcome).toBe("issued");
+      expect(fresh.grantId).not.toBe(stale.grantId);
+      const rows = await grantsOf(interactionId);
+      expect(rows.find((row) => row.id === stale.grantId)!.outcome).toBe("expired");
+      expect(rows.filter((row) => row.outcome === "issued").map((row) => row.id)).toEqual([fresh.grantId]);
+      // The expired grant can no longer be consumed.
+      await expect(at(5_000).consume(claimsFor(runId), stale.grantId, consumeInput())).rejects.toMatchObject({ status: 410 });
+      expect(forge.pushes).toHaveLength(0);
+    });
+
+    it("N3 keeps the agreement locked while its issued grant is still valid", async () => {
+      const runId = await liveRun();
+      const interactionId = await agreement();
+      const grant = await service().issue(claimsFor(runId), grantInput(interactionId, { ttlSeconds: 120 }));
+      await expect(at(60_000).issue(claimsFor(runId), grantInput(interactionId)))
+        .rejects.toMatchObject({ status: 409, details: { code: "agreement_used" } });
+      const rows = await grantsOf(interactionId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: grant.grantId, outcome: "issued" });
+    });
+
+    it("N3 never expires consumed or unknown grants: they keep the agreement locked after expiresAt", async () => {
+      const runId = await liveRun();
+      const consumedAgreement = await agreement();
+      const consumed = await service().issue(claimsFor(runId), grantInput(consumedAgreement, { ttlSeconds: 120 }));
+      await expect(service().consume(claimsFor(runId), consumed.grantId, consumeInput())).resolves.toMatchObject({ outcome: "consumed" });
+      forge.head = OLD;
+      const unknownAgreement = await agreement();
+      const unknown = await service().issue(claimsFor(runId), grantInput(unknownAgreement, { ttlSeconds: 120 }));
+      await db.update(pushGrants).set({ outcome: "unknown" }).where(eq(pushGrants.id, unknown.grantId));
+      for (const [interactionId, outcome] of [[consumedAgreement, "consumed"], [unknownAgreement, "unknown"]] as const) {
+        // Well past expiresAt (120 s): the grant had an external effect, or may have had one.
+        await expect(at(300_000).issue(claimsFor(runId), grantInput(interactionId)))
+          .rejects.toMatchObject({ status: 409, details: { code: "agreement_used" } });
+        const rows = await grantsOf(interactionId);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.outcome).toBe(outcome);
+      }
+    });
+
+    it("N3 keeps the agreement reusable after a failed, expired, revoked or rejected grant", async () => {
+      const runId = await liveRun();
+      for (const outcome of ["failed", "expired", "revoked", "rejected"] as const) {
+        const interactionId = await agreement();
+        const first = await service().issue(claimsFor(runId), grantInput(interactionId));
+        await db.update(pushGrants).set({ outcome }).where(eq(pushGrants.id, first.grantId));
+        await expect(service().issue(claimsFor(runId), grantInput(interactionId))).resolves.toMatchObject({ outcome: "issued" });
+        const rows = await grantsOf(interactionId);
+        expect(rows.map((row) => row.outcome).sort()).toEqual(["issued", outcome].sort());
+      }
+    });
+
+    it("N3 keeps two issued grants on one agreement impossible, including on a race after expiry", async () => {
+      const runId = await liveRun();
+      const interactionId = await agreement();
+      const stale = await service().issue(claimsFor(runId), grantInput(interactionId, { ttlSeconds: 1 }));
+      const [row] = await grantsOf(interactionId);
+      // The partial unique index still refuses a second issued grant written directly.
+      const direct = await db.insert(pushGrants).values({ ...row!, id: randomUUID(), requestId: `direct-${randomUUID()}` })
+        .then(() => null, (error: { code?: string; cause?: { code?: string } }) => error);
+      expect(direct?.code ?? direct?.cause?.code).toBe("23505");
+      const results = await Promise.allSettled([
+        at(5_000).issue(claimsFor(runId), grantInput(interactionId)),
+        at(5_000).issue(claimsFor(runId), grantInput(interactionId)),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.find((result) => result.status === "rejected")).toMatchObject({ reason: { status: 409 } });
+      const rows = await grantsOf(interactionId);
+      expect(rows.find((grant) => grant.id === stale.grantId)!.outcome).toBe("expired");
+      expect(rows.filter((grant) => grant.outcome === "issued")).toHaveLength(1);
+    });
+  });
+
   // ACC-4966 M2 — server-side repository allowlist and default-branch policy.
   describe("repository and ref policy (ACC-4966 M2)", () => {
     it("refuses a repository outside the company allowlist at issue, before any write", async () => {

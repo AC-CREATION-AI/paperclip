@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { and, eq, notInArray, sql } from "drizzle-orm";
+import { and, eq, lte, notInArray, sql } from "drizzle-orm";
 import {
   agents,
   heartbeatRuns,
@@ -288,6 +288,7 @@ export function pushGrantService(db: Db, deps: PushGrantDeps = {}) {
       companyId: run.companyId, interactionId: input.interactionId, issueId,
       repository: input.repository, ref: input.ref, mode: input.mode, expectedOldSha, newSha,
     });
+    await expireStaleIssuedGrants(db, input.interactionId);
     if (await activeGrantFor(db, input.interactionId)) throw agreementUsed();
     const forge = forgeFor({ companyId: run.companyId, issueId, agentId: run.agentId, runId: run.id });
     const remoteHead = await readLease(forge, input.repository, input.ref);
@@ -297,6 +298,7 @@ export function pushGrantService(db: Db, deps: PushGrantDeps = {}) {
     try {
       const grant = await db.transaction(async (tx) => {
         // Same-transaction guard; the partial unique index closes the race.
+        await expireStaleIssuedGrants(tx, input.interactionId);
         if (await activeGrantFor(tx, input.interactionId)) throw agreementUsed();
         const [row] = await tx.insert(pushGrants).values({
           companyId: run.companyId,
@@ -325,6 +327,24 @@ export function pushGrantService(db: Db, deps: PushGrantDeps = {}) {
       if (violation) throw conflict("requestId was already used with different arguments.");
       throw error;
     }
+  }
+
+  /**
+   * ACC-4980 N3: an `issued` grant that was never consumed expires at
+   * `expiresAt`. It is marked `expired` when the agreement is checked, so it no
+   * longer holds `push_grants_active_interaction_uq` and the human agreement can
+   * open a new grant. Only `issued` grants expire: `consumed` and `unknown`
+   * grants had, or may have had, an external effect and keep the agreement
+   * locked. The unique index itself is unchanged.
+   */
+  async function expireStaleIssuedGrants(executor: Pick<Db, "update">, interactionId: string) {
+    const at = now();
+    await executor.update(pushGrants).set({ outcome: "expired", updatedAt: at })
+      .where(and(
+        eq(pushGrants.interactionId, interactionId),
+        eq(pushGrants.outcome, "issued"),
+        lte(pushGrants.expiresAt, at),
+      ));
   }
 
   async function activeGrantFor(executor: Pick<Db, "select">, interactionId: string) {
@@ -404,6 +424,7 @@ export function pushGrantService(db: Db, deps: PushGrantDeps = {}) {
         if (!grant) throw notFound("Push grant not found");
         if (grant.agentId !== run.agentId || grant.runId !== run.id) throw forbidden("This grant belongs to another agent or run");
         if (grant.issueId !== issueId) throw forbidden("This grant belongs to another task");
+        if (grant.outcome === "expired") throw new HttpError(410, "Push grant expired");
         if (grant.consumedAt || grant.outcome !== "issued") throw conflict("Push grant was already consumed", { code: "grant_consumed" });
         if (grant.revokedAt) throw forbidden("Push grant was revoked");
         if (grant.expiresAt.getTime() <= now().getTime()) {

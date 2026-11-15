@@ -19,7 +19,7 @@ POST /api/companies/{companyId}/push-grants
 }
 ```
 
-A grant lives at most 120 seconds.
+A grant lives at most 120 seconds. A grant that is still `issued` when `expiresAt` passes is expired: consuming it returns `410`, and the next grant request on the same agreement marks it `expired` first, which frees the agreement.
 
 ## Consume a grant
 
@@ -42,7 +42,7 @@ A replay with the same `requestId` returns the stored result only to the same gr
 - No extra or missing field, and no prose around the block.
 - The prompt, the details and the human answer together must contain exactly one block.
 - The block must match the request exactly. Repository and SHAs are compared case-insensitively, and the ref and mode must match exactly.
-- One agreement opens one grant. The agreement can be used again only if that grant ended as `failed`, `expired`, `revoked` or `rejected`. A grant that is `issued`, `consumed` or `unknown` blocks the agreement. The database enforces this with the partial unique index `push_grants_active_interaction_uq`.
+- One agreement opens one grant. The agreement can be used again only if that grant ended as `failed`, `expired`, `revoked` or `rejected`. A grant that is `issued` and not yet expired, `consumed` or `unknown` blocks the agreement. An `issued` grant past `expiresAt` that was never consumed no longer blocks it: the server marks it `expired` before checking the agreement, in the same transaction as the new grant. `consumed` and `unknown` grants never expire this way, because they had or may have had an effect on the forge. The database enforces one active grant per agreement with the partial unique index `push_grants_active_interaction_uq`, unchanged.
 
 ## Repository allowlist
 
